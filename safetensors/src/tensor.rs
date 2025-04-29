@@ -361,6 +361,7 @@ impl<'data> SafeTensors<'data> {
                 dtype: info.dtype,
                 shape: info.shape.clone(),
                 data: &self.data[info.data_offsets.0..info.data_offsets.1],
+                enc: None,
             };
             tensors.push((name.to_string(), tensorview));
         }
@@ -379,6 +380,7 @@ impl<'data> SafeTensors<'data> {
                     dtype: info.dtype,
                     shape: info.shape.clone(),
                     data: &self.data[info.data_offsets.0..info.data_offsets.1],
+                    enc: None,
                 },
             )
         })
@@ -394,6 +396,7 @@ impl<'data> SafeTensors<'data> {
                     dtype: info.dtype,
                     shape: info.shape.clone(),
                     data: &self.data[info.data_offsets.0..info.data_offsets.1],
+                    enc: None,
                 })
             } else {
                 Err(SafeTensorError::TensorNotFound(tensor_name.to_string()))
@@ -575,6 +578,8 @@ pub struct TensorView<'data> {
     dtype: Dtype,
     shape: Vec<usize>,
     data: &'data [u8],
+    /// Optional encryption information
+    enc: Option<&'data EncInfo>,
 }
 
 impl View for &TensorView<'_> {
@@ -625,7 +630,7 @@ impl<'data> TensorView<'data> {
         if n != n_elements * dtype.size() {
             Err(SafeTensorError::InvalidTensorView(dtype, shape, n))
         } else {
-            Ok(Self { dtype, shape, data })
+            Ok(Self { dtype, shape, data, enc: None })
         }
     }
     /// The current tensor dtype
@@ -724,6 +729,23 @@ impl Dtype {
             Dtype::F64 => 8,
         }
     }
+}
+
+/// Information about encrypted tensor data
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct EncInfo {
+    /// Algorithm used to encrypt the key
+    pub key_enc_algo: String,
+    /// Algorithm used to encrypt the data
+    pub data_enc_algo: String,
+    /// Key identifier
+    pub key_id: String,
+    /// Encrypted key
+    pub enc_key: Vec<u8>,
+    /// Initialization vector
+    pub iv: Vec<u8>,
+    /// Authentication tag
+    pub tag: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -939,6 +961,7 @@ mod tests {
             dtype: Dtype::F32,
             shape: vec![1, 2, 3],
             data: &data,
+            enc: None,
         };
         let metadata: HashMap<String, TensorView> =
             [("attn.0".to_string(), attn_0)].into_iter().collect();
