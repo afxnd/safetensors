@@ -3,10 +3,13 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 pub mod slice;
 pub mod tensor;
+/// 加密相关的功能模块
+pub mod crypto;
 /// serialize_to_file only valid in std
 #[cfg(feature = "std")]
 pub use tensor::serialize_to_file;
 pub use tensor::{serialize, Dtype, SafeTensorError, SafeTensors, View};
+pub use crypto::EncInfo;
 
 #[cfg(feature = "alloc")]
 #[macro_use]

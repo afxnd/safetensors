@@ -1,6 +1,7 @@
 //! Module Containing the most important structures
 use crate::lib::{Cow, HashMap, String, ToString, Vec};
 use crate::slice::{InvalidSlice, SliceIterator, TensorIndexer};
+use crate::crypto::EncInfo;
 use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(feature = "std")]
 use std::io::Write;
@@ -171,7 +172,7 @@ pub trait View {
 fn prepare<S: AsRef<str> + Ord + core::fmt::Display, V: View, I: IntoIterator<Item = (S, V)>>(
     data: I,
     data_info: &Option<HashMap<String, String>>,
-    encryption_info: &Option<HashMap<String, String>>,
+    encryption_info: &Option<HashMap<String, EncInfo>>,
     // ) -> Result<(Metadata, Vec<&'hash TensorView<'data>>, usize), SafeTensorError> {
 ) -> Result<(PreparedData, Vec<V>), SafeTensorError> {
     // Make sure we're sorting by descending dtype alignment
@@ -223,7 +224,7 @@ pub fn serialize<
 >(
     data: I,
     data_info: &Option<HashMap<String, String>>,
-    encryption_info: &Option<HashMap<String, String>>,
+    encryption_info: &Option<HashMap<String, EncInfo>>,
 ) -> Result<Vec<u8>, SafeTensorError> {
     let (
         PreparedData {
@@ -254,7 +255,7 @@ pub fn serialize_to_file<
 >(
     data: I,
     data_info: &Option<HashMap<String, String>>,
-    encryption_info: &Option<HashMap<String, String>>,
+    encryption_info: &Option<HashMap<String, EncInfo>>,
     filename: &std::path::Path,
 ) -> Result<(), SafeTensorError> {
     let (
@@ -449,7 +450,7 @@ impl<'data> SafeTensors<'data> {
 #[derive(Debug, Clone)]
 pub struct Metadata {
     metadata: Option<HashMap<String, String>>,
-    encryption: Option<HashMap<String, String>>,
+    encryption: Option<HashMap<String, EncInfo>>,
     tensors: Vec<TensorInfo>,
     index_map: HashMap<String, usize>,
 }
@@ -475,7 +476,7 @@ impl<'de> Deserialize<'de> for Metadata {
         
         let (metadata, encryption) = if let Some(mut metadata_map) = hashdata.metadata {
             let encryption = if let Some(enc_str) = metadata_map.remove("__encryption__") {
-                Some(serde_json::from_str(&enc_str).map_err(serde::de::Error::custom)?)
+                Some(crate::crypto::parse_encryption_info(&enc_str).map_err(serde::de::Error::custom)?)
             } else {
                 None
             };
@@ -519,7 +520,7 @@ impl Serialize for Metadata {
             }
             
             if let Some(encryption) = &self.encryption {
-                metadata_map.insert("__encryption__".to_string(), serde_json::to_string(encryption)
+                metadata_map.insert("__encryption__".to_string(), crate::crypto::serialize_encryption_info(encryption)
                     .map_err(|e| serde::ser::Error::custom(e.to_string()))?);
             }
             
@@ -536,7 +537,7 @@ impl Serialize for Metadata {
 impl Metadata {
     fn new(
         metadata: Option<HashMap<String, String>>,
-        encryption: Option<HashMap<String, String>>,
+        encryption: Option<HashMap<String, EncInfo>>,
         tensors: Vec<(String, TensorInfo)>,
     ) -> Result<Self, SafeTensorError> {
         let mut index_map = HashMap::with_capacity(tensors.len());
@@ -616,7 +617,7 @@ impl Metadata {
     }
 
     /// Gives back the encryption information
-    pub fn encryption(&self) -> &Option<HashMap<String, String>> {
+    pub fn encryption(&self) -> &Option<HashMap<String, EncInfo>> {
         &self.encryption
     }
 }
@@ -630,7 +631,7 @@ pub struct TensorView<'data> {
     shape: Vec<usize>,
     data: &'data [u8],
     /// Optional encryption information
-    enc: Option<String>,
+    enc: Option<EncInfo>,
 }
 
 impl View for &TensorView<'_> {
@@ -780,23 +781,6 @@ impl Dtype {
             Dtype::F64 => 8,
         }
     }
-}
-
-/// Information about encrypted tensor data
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct EncInfo {
-    /// Algorithm used to encrypt the key
-    pub key_enc_algo: String,
-    /// Algorithm used to encrypt the data
-    pub data_enc_algo: String,
-    /// Key identifier
-    pub key_id: String,
-    /// Encrypted key
-    pub enc_key: Vec<u8>,
-    /// Initialization vector
-    pub iv: Vec<u8>,
-    /// Authentication tag
-    pub tag: Vec<u8>,
 }
 
 #[cfg(test)]
