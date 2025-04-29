@@ -171,6 +171,7 @@ pub trait View {
 fn prepare<S: AsRef<str> + Ord + core::fmt::Display, V: View, I: IntoIterator<Item = (S, V)>>(
     data: I,
     data_info: &Option<HashMap<String, String>>,
+    encryption_info: &Option<HashMap<String, String>>,
     // ) -> Result<(Metadata, Vec<&'hash TensorView<'data>>, usize), SafeTensorError> {
 ) -> Result<(PreparedData, Vec<V>), SafeTensorError> {
     // Make sure we're sorting by descending dtype alignment
@@ -196,7 +197,7 @@ fn prepare<S: AsRef<str> + Ord + core::fmt::Display, V: View, I: IntoIterator<It
         tensors.push(tensor);
     }
 
-    let metadata: Metadata = Metadata::new(data_info.clone(), hmetadata)?;
+    let metadata: Metadata = Metadata::new(data_info.clone(), encryption_info.clone(), hmetadata)?;
     let mut metadata_buf = serde_json::to_string(&metadata)?.into_bytes();
     // Force alignment to 8 bytes.
     let extra = (8 - metadata_buf.len() % 8) % 8;
@@ -222,6 +223,7 @@ pub fn serialize<
 >(
     data: I,
     data_info: &Option<HashMap<String, String>>,
+    encryption_info: &Option<HashMap<String, String>>,
 ) -> Result<Vec<u8>, SafeTensorError> {
     let (
         PreparedData {
@@ -230,7 +232,7 @@ pub fn serialize<
             offset,
         },
         tensors,
-    ) = prepare(data, data_info)?;
+    ) = prepare(data, data_info, encryption_info)?;
     let expected_size = 8 + header_bytes.len() + offset;
     let mut buffer: Vec<u8> = Vec::with_capacity(expected_size);
     buffer.extend(&n.to_le_bytes().to_vec());
@@ -252,6 +254,7 @@ pub fn serialize_to_file<
 >(
     data: I,
     data_info: &Option<HashMap<String, String>>,
+    encryption_info: &Option<HashMap<String, String>>,
     filename: &std::path::Path,
 ) -> Result<(), SafeTensorError> {
     let (
@@ -259,7 +262,7 @@ pub fn serialize_to_file<
             n, header_bytes, ..
         },
         tensors,
-    ) = prepare(data, data_info)?;
+    ) = prepare(data, data_info, encryption_info)?;
     let mut f = std::io::BufWriter::new(std::fs::File::create(filename)?);
     f.write_all(n.to_le_bytes().as_ref())?;
     f.write_all(&header_bytes)?;
@@ -357,11 +360,16 @@ impl<'data> SafeTensors<'data> {
         let mut tensors = Vec::with_capacity(self.metadata.index_map.len());
         for (name, &index) in &self.metadata.index_map {
             let info = &self.metadata.tensors[index];
+            let enc_info = if let Some(encryption) = &self.metadata.encryption {
+                encryption.get(name.as_str()).cloned()
+            } else {
+                None
+            };
             let tensorview = TensorView {
                 dtype: info.dtype,
                 shape: info.shape.clone(),
                 data: &self.data[info.data_offsets.0..info.data_offsets.1],
-                enc: None,
+                enc: enc_info,
             };
             tensors.push((name.to_string(), tensorview));
         }
@@ -374,13 +382,18 @@ impl<'data> SafeTensors<'data> {
     pub fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a str, TensorView<'data>)> {
         self.metadata.index_map.iter().map(|(name, &idx)| {
             let info = &self.metadata.tensors[idx];
+            let enc_info = if let Some(encryption) = &self.metadata.encryption {
+                encryption.get(name.as_str()).cloned()
+            } else {
+                None
+            };
             (
                 name.as_str(),
                 TensorView {
                     dtype: info.dtype,
                     shape: info.shape.clone(),
                     data: &self.data[info.data_offsets.0..info.data_offsets.1],
-                    enc: None,
+                    enc: enc_info,
                 },
             )
         })
@@ -392,11 +405,16 @@ impl<'data> SafeTensors<'data> {
     pub fn tensor(&self, tensor_name: &str) -> Result<TensorView<'data>, SafeTensorError> {
         if let Some(index) = &self.metadata.index_map.get(tensor_name) {
             if let Some(info) = &self.metadata.tensors.get(**index) {
+                let enc_info = if let Some(encryption) = &self.metadata.encryption {
+                    encryption.get(tensor_name).cloned()
+                } else {
+                    None
+                };
                 Ok(TensorView {
                     dtype: info.dtype,
                     shape: info.shape.clone(),
                     data: &self.data[info.data_offsets.0..info.data_offsets.1],
-                    enc: None,
+                    enc: enc_info,
                 })
             } else {
                 Err(SafeTensorError::TensorNotFound(tensor_name.to_string()))
@@ -431,6 +449,7 @@ impl<'data> SafeTensors<'data> {
 #[derive(Debug, Clone)]
 pub struct Metadata {
     metadata: Option<HashMap<String, String>>,
+    encryption: Option<HashMap<String, String>>,
     tensors: Vec<TensorInfo>,
     index_map: HashMap<String, usize>,
 }
@@ -451,14 +470,27 @@ impl<'de> Deserialize<'de> for Metadata {
         D: Deserializer<'de>,
     {
         let hashdata: HashMetadata = HashMetadata::deserialize(deserializer)?;
-        let (metadata, tensors) = (hashdata.metadata, hashdata.tensors);
+        let mut tensors: Vec<_> = hashdata.tensors.into_iter().collect();
+        tensors.sort_by(|(_, left), (_, right)| left.data_offsets.cmp(&right.data_offsets));
+        
+        let (metadata, encryption) = if let Some(mut metadata_map) = hashdata.metadata {
+            let encryption = if let Some(enc_str) = metadata_map.remove("__encryption__") {
+                Some(serde_json::from_str(&enc_str).map_err(serde::de::Error::custom)?)
+            } else {
+                None
+            };
+            (Some(metadata_map), encryption)
+        } else {
+            (None, None)
+        };
+        
         let mut tensors: Vec<_> = tensors.into_iter().collect();
         // We need to sort by offsets
         // Previous versions might have a different ordering
         // Than we expect (Not aligned ordered, but purely name ordered,
         // or actually any order).
         tensors.sort_by(|(_, left), (_, right)| left.data_offsets.cmp(&right.data_offsets));
-        Metadata::new(metadata, tensors).map_err(serde::de::Error::custom)
+        Metadata::new(metadata, encryption, tensors).map_err(serde::de::Error::custom)
     }
 }
 
@@ -473,15 +505,27 @@ impl Serialize for Metadata {
         }
 
         let tensors: Vec<_> = names.iter().zip(self.tensors.iter()).collect();
-        let length = if let Some(metadata) = &self.metadata {
-            metadata.len()
-        } else {
-            0
-        };
-        let mut map = serializer.serialize_map(Some(tensors.len() + length))?;
-        if let Some(metadata) = &self.metadata {
-            map.serialize_entry("__metadata__", metadata)?;
+        
+        let mut map = serializer.serialize_map(Some(tensors.len() + 1))?;
+        
+        // Create metadata content
+        if self.metadata.is_some() || self.encryption.is_some() {
+            let mut metadata_map = HashMap::new();
+            
+            if let Some(metadata) = &self.metadata {
+                for (key, value) in metadata {
+                    metadata_map.insert(key.clone(), value.clone());
+                }
+            }
+            
+            if let Some(encryption) = &self.encryption {
+                metadata_map.insert("__encryption__".to_string(), serde_json::to_string(encryption)
+                    .map_err(|e| serde::ser::Error::custom(e.to_string()))?);
+            }
+            
+            map.serialize_entry("__metadata__", &metadata_map)?;
         }
+        
         for (name, info) in tensors {
             map.serialize_entry(&name, &info)?;
         }
@@ -492,6 +536,7 @@ impl Serialize for Metadata {
 impl Metadata {
     fn new(
         metadata: Option<HashMap<String, String>>,
+        encryption: Option<HashMap<String, String>>,
         tensors: Vec<(String, TensorInfo)>,
     ) -> Result<Self, SafeTensorError> {
         let mut index_map = HashMap::with_capacity(tensors.len());
@@ -507,6 +552,7 @@ impl Metadata {
 
         let metadata = Self {
             metadata,
+            encryption,
             tensors,
             index_map,
         };
@@ -568,6 +614,11 @@ impl Metadata {
     pub fn metadata(&self) -> &Option<HashMap<String, String>> {
         &self.metadata
     }
+
+    /// Gives back the encryption information
+    pub fn encryption(&self) -> &Option<HashMap<String, String>> {
+        &self.encryption
+    }
 }
 
 /// A view of a Tensor within the file.
@@ -579,7 +630,7 @@ pub struct TensorView<'data> {
     shape: Vec<usize>,
     data: &'data [u8],
     /// Optional encryption information
-    enc: Option<&'data EncInfo>,
+    enc: Option<String>,
 }
 
 impl View for &TensorView<'_> {
@@ -732,7 +783,7 @@ impl Dtype {
 }
 
 /// Information about encrypted tensor data
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct EncInfo {
     /// Algorithm used to encrypt the key
     pub key_enc_algo: String,
@@ -819,6 +870,7 @@ mod tests {
                     .collect();
                 Metadata {
                     metadata: None,
+                    encryption: None,
                     tensors,
                     index_map,
                 }
@@ -852,7 +904,7 @@ mod tests {
             let data: Vec<u8> = (0..data_size(&metadata)).map(|x| x as u8).collect();
             let before = SafeTensors { metadata, data: &data };
             let tensors = before.tensors();
-            let bytes = serialize(tensors.iter().map(|(name, view)| (name.to_string(), view)), &None).unwrap();
+            let bytes = serialize(tensors.iter().map(|(name, view)| (name.to_string(), view)), &None, &None).unwrap();
 
             let after = SafeTensors::deserialize(&bytes).unwrap();
 
@@ -878,7 +930,7 @@ mod tests {
         let metadata: HashMap<String, TensorView> =
             [("attn.0".to_string(), attn_0)].into_iter().collect();
 
-        let out = serialize(&metadata, &None).unwrap();
+        let out = serialize(&metadata, &None, &None).unwrap();
         assert_eq!(
             out,
             [
@@ -896,7 +948,7 @@ mod tests {
     fn test_empty() {
         let tensors: HashMap<String, TensorView> = HashMap::new();
 
-        let out = serialize(&tensors, &None).unwrap();
+        let out = serialize(&tensors, &None, &None).unwrap();
         assert_eq!(
             out,
             [8, 0, 0, 0, 0, 0, 0, 0, 123, 125, 32, 32, 32, 32, 32, 32]
@@ -908,7 +960,7 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        let out = serialize(&tensors, &metadata).unwrap();
+        let out = serialize(&tensors, &metadata, &None).unwrap();
         assert_eq!(
             out,
             [
@@ -932,7 +984,7 @@ mod tests {
             // Smaller string to force misalignment compared to previous test.
             [("attn0".to_string(), attn_0)].into_iter().collect();
 
-        let out = serialize(&metadata, &None).unwrap();
+        let out = serialize(&metadata, &None, &None).unwrap();
         assert_eq!(
             out,
             [
@@ -966,7 +1018,7 @@ mod tests {
         let metadata: HashMap<String, TensorView> =
             [("attn.0".to_string(), attn_0)].into_iter().collect();
 
-        let out = serialize(&metadata, &None).unwrap();
+        let out = serialize(&metadata, &None, &None).unwrap();
         let parsed = SafeTensors::deserialize(&out).unwrap();
 
         let out_buffer: Vec<u8> = parsed
@@ -1052,7 +1104,7 @@ mod tests {
 
         let filename = format!("./out_{model_id}.safetensors");
 
-        let out = serialize(&metadata, &None).unwrap();
+        let out = serialize(&metadata, &None, &None).unwrap();
         std::fs::write(&filename, out).unwrap();
         let raw = std::fs::read(&filename).unwrap();
         let _deserialized = SafeTensors::deserialize(&raw).unwrap();
@@ -1061,7 +1113,7 @@ mod tests {
         // File api
         #[cfg(feature = "std")]
         {
-            serialize_to_file(&metadata, &None, std::path::Path::new(&filename)).unwrap();
+            serialize_to_file(&metadata, &None, &None, std::path::Path::new(&filename)).unwrap();
             let raw = std::fs::read(&filename).unwrap();
             let _deserialized = SafeTensors::deserialize(&raw).unwrap();
             std::fs::remove_file(&filename).unwrap();
