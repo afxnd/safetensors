@@ -9,7 +9,7 @@ pub mod crypto;
 #[cfg(feature = "std")]
 pub use tensor::serialize_to_file;
 pub use tensor::{serialize, Dtype, SafeTensorError, SafeTensors, View};
-pub use crypto::EncInfo;
+pub use crypto::{TensorEncryptionInfo, TensorEncryptionConfig};
 
 #[cfg(feature = "alloc")]
 #[macro_use]

@@ -1,7 +1,7 @@
 //! Module Containing the most important structures
 use crate::lib::{Cow, HashMap, String, ToString, Vec};
 use crate::slice::{InvalidSlice, SliceIterator, TensorIndexer};
-use crate::crypto::EncInfo;
+use crate::crypto::TensorEncryptionInfo;
 use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(feature = "std")]
 use std::io::Write;
@@ -172,7 +172,7 @@ pub trait View {
 fn prepare<S: AsRef<str> + Ord + core::fmt::Display, V: View, I: IntoIterator<Item = (S, V)>>(
     data: I,
     data_info: &Option<HashMap<String, String>>,
-    encryption_info: &Option<HashMap<String, EncInfo>>,
+    encryption_info: &Option<HashMap<String, TensorEncryptionInfo>>,
     // ) -> Result<(Metadata, Vec<&'hash TensorView<'data>>, usize), SafeTensorError> {
 ) -> Result<(PreparedData, Vec<V>), SafeTensorError> {
     // Make sure we're sorting by descending dtype alignment
@@ -224,7 +224,7 @@ pub fn serialize<
 >(
     data: I,
     data_info: &Option<HashMap<String, String>>,
-    encryption_info: &Option<HashMap<String, EncInfo>>,
+    encryption_info: &Option<HashMap<String, TensorEncryptionInfo>>,
 ) -> Result<Vec<u8>, SafeTensorError> {
     let (
         PreparedData {
@@ -255,7 +255,7 @@ pub fn serialize_to_file<
 >(
     data: I,
     data_info: &Option<HashMap<String, String>>,
-    encryption_info: &Option<HashMap<String, EncInfo>>,
+    encryption_info: &Option<HashMap<String, TensorEncryptionInfo>>,
     filename: &std::path::Path,
 ) -> Result<(), SafeTensorError> {
     let (
@@ -450,7 +450,7 @@ impl<'data> SafeTensors<'data> {
 #[derive(Debug, Clone)]
 pub struct Metadata {
     metadata: Option<HashMap<String, String>>,
-    encryption: Option<HashMap<String, EncInfo>>,
+    encryption: Option<HashMap<String, TensorEncryptionInfo>>,
     tensors: Vec<TensorInfo>,
     index_map: HashMap<String, usize>,
 }
@@ -537,7 +537,7 @@ impl Serialize for Metadata {
 impl Metadata {
     fn new(
         metadata: Option<HashMap<String, String>>,
-        encryption: Option<HashMap<String, EncInfo>>,
+        encryption: Option<HashMap<String, TensorEncryptionInfo>>,
         tensors: Vec<(String, TensorInfo)>,
     ) -> Result<Self, SafeTensorError> {
         let mut index_map = HashMap::with_capacity(tensors.len());
@@ -617,7 +617,7 @@ impl Metadata {
     }
 
     /// Gives back the encryption information
-    pub fn encryption(&self) -> &Option<HashMap<String, EncInfo>> {
+    pub fn encryption(&self) -> &Option<HashMap<String, TensorEncryptionInfo>> {
         &self.encryption
     }
 }
@@ -631,7 +631,7 @@ pub struct TensorView<'data> {
     shape: Vec<usize>,
     data: &'data [u8],
     /// Optional encryption information
-    enc: Option<EncInfo>,
+    enc: Option<TensorEncryptionInfo>,
 }
 
 impl View for &TensorView<'_> {
