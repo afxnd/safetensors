@@ -20,35 +20,36 @@
 
 ### 文件格式设计
 
-1. 为了保持对Safetensor的兼容，在`__metadata__`下新增3个字段
+1. 为了保持对Safetensor的兼容，在`__metadata__`下新增字段
 ```json
 {
   "__metadata__": {
     "__encryption__": "json encoded string",
-    "__policy__": "json encoded string",
-    "__signature__": "json encoded string",
+    "__policy__": "json encoded string", // 待实现
+    "__signature__": "json encoded string" // 待实现
   }
 }
 ```
 
-2. 在`__encryption__`中保存所加密的Tensor的元数据
+2. 在`__encryption__`中保存加密的Tensor的元数据
 ```json
 {
     "__encryption__": {
       "tensor_name1": { // 被加密的Tensor名字
-        "key_enc_algo": "String", // 加密数据加密密钥时使用的算法
-        "data_enc_algo": "String", // 加密数据时使用的算法
+        "key_enc_algo": "String", // 加密数据加密密钥时使用的算法 (aes256gcm/chacha20poly1305)
+        "data_enc_algo": "String", // 加密数据时使用的算法 (aes256gcm/chacha20poly1305)
         "key_id": "String", // 主密钥ID（可选）
-        "enc_key": "Vec", // 数据加密密钥密文
-        "key_iv": "Vec", // 数据加密密钥密文对应的iv
-        "key_tag": "Vec", // 数据加密密钥密文对应的tag
-        "iv": "Vec", // 数据密文对应的iv
-        "tag": "Vec", // 数据密文对应的tag
+        "enc_key": "Vec<u8>", // 数据加密密钥密文
+        "key_iv": "Vec<u8>", // 数据加密密钥密文对应的iv
+        "key_tag": "Vec<u8>", // 数据加密密钥密文对应的tag
+        "iv": "Vec<u8>", // 数据密文对应的iv
+        "tag": "Vec<u8>" // 数据密文对应的tag
       }
     }
 }
 ```
-3. 在`__policy__`中保存受控部署策略(待明确)
+
+3. 在`__policy__`中保存受控部署策略(待实现)
 ```json
 {
     "__policy__": {
@@ -75,7 +76,7 @@
 }
 ```
 
-4. 在`__signature__`中保存完整性保护信息
+4. 在`__signature__`中保存完整性保护信息(待实现)
 ```json
 {
     "__signature__": {
@@ -88,7 +89,7 @@
             "x5t": "String", // X.509 Certificate SHA-1 Thumbprint
             "x5t#S256": "String" // X.509 Certificate SHA-256 Thumbprint
         },
-        "signature": "Vec" // 对Header进行签名产生的东西
+        "signature": "Vec<u8>" // 对Header进行签名产生的东西
     }
 }
 ```
