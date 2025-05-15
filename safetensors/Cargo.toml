@@ -42,3 +42,7 @@ alloc = ["serde/alloc", "serde_json/alloc", "hashbrown"]
 [[bench]]
 name = "benchmark"
 harness = false
+
+[[bench]]
+name = "benchmark_crypto"
+harness = false
