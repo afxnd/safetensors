@@ -1,7 +1,7 @@
 //! Module Containing the most important structures
-use crate::lib::{Cow, HashMap, String, ToString, Vec};
+use crate::lib::{Cow, HashMap, BTreeMap, String, ToString, Vec};
 use crate::slice::{InvalidSlice, SliceIterator, TensorIndexer};
-use crate::crypto::{CryptoManager, EncryptConfig, DecryptConfig};
+use crate::crypto::{CryptoTensor, SerializeCryptoConfig};
 use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(feature = "std")]
 use std::io::Write;
@@ -45,7 +45,7 @@ pub enum SafeTensorError {
     /// arithmetic overflow. This is most likely an error in the file.
     ValidationOverflow,
     /// The error occurred during encryption or decryption
-    CryptoError(String),
+    CryptoTensorError(String),
 }
 
 #[cfg(feature = "std")]
@@ -58,6 +58,12 @@ impl From<std::io::Error> for SafeTensorError {
 impl From<serde_json::Error> for SafeTensorError {
     fn from(error: serde_json::Error) -> SafeTensorError {
         SafeTensorError::JsonError(error)
+    }
+}
+
+impl From<crate::crypto::CryptoTensorError> for SafeTensorError {
+    fn from(error: crate::crypto::CryptoTensorError) -> Self {
+        SafeTensorError::CryptoTensorError(error.to_string())
     }
 }
 
@@ -174,9 +180,9 @@ pub trait View {
 fn prepare<'data, S: AsRef<str> + Ord + core::fmt::Display, V: View + 'data, I: IntoIterator<Item = (S, V)>>(
     data: I,
     data_info: &Option<HashMap<String, String>>,
-    enc_config: Option<&EncryptConfig>,
+    crypto_config: Option<&SerializeCryptoConfig>,
     // ) -> Result<(Metadata, Vec<&'hash TensorView<'data>>, usize), SafeTensorError> {
-) -> Result<(PreparedData, Vec<V>, CryptoManager<'data>, Vec<String>), SafeTensorError> {
+) -> Result<(PreparedData, Vec<V>, Option<CryptoTensor<'data>>, Vec<String>), SafeTensorError> {
     // Make sure we're sorting by descending dtype alignment
     // Then by name
     let mut data: Vec<_> = data.into_iter().collect();
@@ -190,7 +196,11 @@ fn prepare<'data, S: AsRef<str> + Ord + core::fmt::Display, V: View + 'data, I: 
     let data: Vec<_> = data.into_iter().collect();
     // Generate the crypto manager
     let tensor_names: Vec<String> = data.iter().map(|(name, _)| name.to_string()).collect();
-    let mut crypto = CryptoManager::from_encrypt_config(enc_config, tensor_names.clone());
+    let mut crypto = if let Some(config) = crypto_config {
+        CryptoTensor::from_serialize_config(tensor_names.clone(), config).unwrap()
+    } else {
+        None
+    };
     for (name, tensor) in data {
         let n = tensor.data_len();
         let tensor_info = TensorInfo {
@@ -201,24 +211,19 @@ fn prepare<'data, S: AsRef<str> + Ord + core::fmt::Display, V: View + 'data, I: 
         offset += n;
         hmetadata.push((name.to_string(), tensor_info));
         // Encrypt the tensor if it needs to be encrypted
-        crypto.silent_encrypt(name.to_string().as_str(), tensor.data().as_ref())?;
+        if let Some(crypto) = &mut crypto {
+            crypto.silent_encrypt(name.to_string().as_str(), tensor.data().as_ref())?;
+        }
         tensors.push(tensor);
     }
 
     // Add crypto info to data_info
-    let crypto_info = crypto.to_string()?;
-    let extended_data_info = match (data_info.as_ref(), crypto_info) {
-        (Some(data_info), Some(mut encrypt_map)) => {
-            let mut map = data_info.clone();
-            map.extend(encrypt_map.drain());
-            Some(map)
-        }
-        (None, Some(encrypt_map)) => Some(encrypt_map),
-        (Some(data_info), None) => Some(data_info.clone()),
-        (None, None) => None,
+    let crypto_metadata = if let Some(crypto) = &crypto {
+        crypto.generate_metadata(hmetadata.clone(), data_info.clone())?
+    } else {
+        data_info.clone()
     };
-
-    let metadata: Metadata = Metadata::new(extended_data_info, hmetadata)?;
+    let metadata: Metadata = Metadata::new(crypto_metadata, hmetadata)?;
     let mut metadata_buf = serde_json::to_string(&metadata)?.into_bytes();
     // Force alignment to 8 bytes.
     let extra = (8 - metadata_buf.len() % 8) % 8;
@@ -246,7 +251,7 @@ pub fn serialize<
 >(
     data: I,
     data_info: &Option<HashMap<String, String>>,
-    enc_config: Option<&EncryptConfig>,  // Optional encryption configuration
+    crypto_config: Option<&SerializeCryptoConfig>,  // Optional encryption configuration
 ) -> Result<Vec<u8>, SafeTensorError> {
     let (
         PreparedData {
@@ -257,14 +262,14 @@ pub fn serialize<
         tensors,
         crypto,
         tensor_names,
-    ) = prepare(data, data_info, enc_config)?;
+    ) = prepare(data, data_info, crypto_config)?;
     let expected_size = 8 + header_bytes.len() + offset;
     let mut buffer: Vec<u8> = Vec::with_capacity(expected_size);
     buffer.extend(&n.to_le_bytes().to_vec());
     buffer.extend(&header_bytes);
     for (name, tensor) in tensor_names.iter().zip(tensors) {
         // Get the encrypted data for the tensor if it is encrypted
-        let encrypted_data = crypto.get_encrypted_data(name);
+        let encrypted_data = crypto.as_ref().and_then(|c| c.get_encrypted_data(name));
         match encrypted_data {
             Some(encrypted_data) => buffer.extend(encrypted_data),
             None => buffer.extend(tensor.data().as_ref()),
@@ -285,7 +290,7 @@ pub fn serialize_to_file<
     data: I,
     data_info: &Option<HashMap<String, String>>,
     filename: &std::path::Path,
-    enc_config: Option<&EncryptConfig>, // Optional encryption configuration
+    crypto_config: Option<&SerializeCryptoConfig>, // Optional encryption configuration
 ) -> Result<(), SafeTensorError> {
     let (
         PreparedData {
@@ -294,13 +299,13 @@ pub fn serialize_to_file<
         tensors,
         crypto,
         tensor_names,
-    ) = prepare(data, data_info, enc_config)?;
+    ) = prepare(data, data_info, crypto_config)?;
     let mut f = std::io::BufWriter::new(std::fs::File::create(filename)?);
     f.write_all(n.to_le_bytes().as_ref())?;
     f.write_all(&header_bytes)?;
     for (name, tensor) in tensor_names.iter().zip(tensors) {
         // Get the encrypted data for the tensor if it is encrypted
-        let encrypted_data = crypto.get_encrypted_data(name);
+        let encrypted_data = crypto.as_ref().and_then(|c| c.get_encrypted_data(name));
         match encrypted_data {
             Some(encrypted_data) => f.write_all(encrypted_data)?,
             None => f.write_all(tensor.data().as_ref())?,
@@ -316,7 +321,7 @@ pub fn serialize_to_file<
 pub struct SafeTensors<'data> {
     metadata: Metadata,
     data: &'data [u8],
-    crypto: Option<CryptoManager<'data>>,
+    crypto: Option<CryptoTensor<'data>>,
 }
 
 impl<'data> SafeTensors<'data> {
@@ -370,7 +375,6 @@ impl<'data> SafeTensors<'data> {
     /// use safetensors::SafeTensors;
     /// use memmap2::MmapOptions;
     /// use std::fs::File;
-    /// use safetensors::crypto::DecryptConfig;
     ///
     /// let filename = "model.safetensors";
     /// # use std::io::Write;
@@ -379,36 +383,19 @@ impl<'data> SafeTensors<'data> {
     /// let file = File::open(filename).unwrap();
     /// let buffer = unsafe { MmapOptions::new().map(&file).unwrap() };
     /// let mut tensors = SafeTensors::deserialize(&buffer).unwrap();
-    /// // If the tensor is encrypted, the decryption configuration is required before accessing the tensor data
-    /// let decrypt_config = DecryptConfig::new(
-    ///     vec![1u8; 32], // 32-byte master key
-    ///     None, // Optional key ID
-    /// );
-    /// tensors.load_decrypt_config(Some(&decrypt_config)).unwrap();
     /// 
     /// let tensor = tensors
     ///         .tensor("test")
     ///         .unwrap();
-    /// ```
+    /// ``` 
     pub fn deserialize<'in_data>(buffer: &'in_data [u8]) -> Result<Self, SafeTensorError>
     where
         'in_data: 'data,
     {
         let (n, metadata) = SafeTensors::read_metadata(buffer)?;
         let data = &buffer[n + 8..];
-        let crypto = CryptoManager::from_metadata(metadata.metadata());
+        let crypto = CryptoTensor::from_header(&metadata)?;
         Ok(Self { metadata, data, crypto })
-    }
-
-    /// Load a decryption configuration for the SafeTensors.
-    /// 
-    /// This method allows you to set a decryption configuration for the SafeTensors,
-    /// which will be used to decrypt the encrypted tensors.
-    pub fn load_decrypt_config(&mut self, config: Option<&DecryptConfig>) -> Result<(), SafeTensorError> {
-        if let Some(crypto) = &mut self.crypto {
-            crypto.from_decrypt_config(config)?;
-        }
-        Ok(())
     }
 
     /// Returns the tensors contained within the SafeTensors.
@@ -444,7 +431,7 @@ impl<'data> SafeTensors<'data> {
                 Some(crypto) => {
                     match crypto.silent_decrypt(name, &self.data[info.data_offsets.0..info.data_offsets.1]) {
                         Ok(decrypted) => decrypted,
-                        Err(e) => return Err(SafeTensorError::CryptoError(e.to_string())),
+                        Err(e) => return Err(SafeTensorError::CryptoTensorError(e.to_string())),
                     }
                 }
                 None => &self.data[info.data_offsets.0..info.data_offsets.1],
@@ -513,7 +500,9 @@ impl<'data> SafeTensors<'data> {
 /// indexing into the raw byte-buffer array and how to interpret it.
 #[derive(Debug, Clone)]
 pub struct Metadata {
-    metadata: Option<HashMap<String, String>>,
+    /// The metadata of the safetensor file
+    /// Public for supporting integrity verification
+    pub metadata: Option<HashMap<String, String>>,
     tensors: Vec<TensorInfo>,
     index_map: HashMap<String, usize>,
 }
@@ -563,7 +552,9 @@ impl Serialize for Metadata {
         };
         let mut map = serializer.serialize_map(Some(tensors.len() + length))?;
         if let Some(metadata) = &self.metadata {
-            map.serialize_entry("__metadata__", metadata)?;
+            // Need to be sorted hashmap to avoid signature verification error
+            let sorted_metadata: BTreeMap<_, _> = metadata.iter().collect();
+            map.serialize_entry("__metadata__", &sorted_metadata)?;
         }
         for (name, info) in tensors {
             map.serialize_entry(&name, &info)?;
@@ -573,7 +564,14 @@ impl Serialize for Metadata {
 }
 
 impl Metadata {
-    fn new(
+    /// Create a new Metadata object
+    /// 
+    /// # Arguments
+    /// 
+    /// * `metadata` - An optional HashMap of metadata
+    /// * `tensors` - A Vec of (String, TensorInfo) tuples
+    /// 
+    pub fn new(
         metadata: Option<HashMap<String, String>>,
         tensors: Vec<(String, TensorInfo)>,
     ) -> Result<Self, SafeTensorError> {
@@ -819,7 +817,13 @@ mod tests {
     use proptest::prelude::*;
     #[cfg(not(feature = "std"))]
     extern crate std;
-    use std::io::Write;
+    use crate::crypto::KeyMaterial;
+    use ring::rand::SystemRandom;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+    #[cfg(feature = "std")]
+    use std::fs;
+    use tempfile;
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
     const MAX_DIMENSION: usize = 8;
     const MAX_SIZE: usize = 8;
@@ -1382,27 +1386,82 @@ mod tests {
         let metadata: HashMap<String, TensorView> =
             [("attn.0".to_string(), attn_0)].into_iter().collect();
 
-        // Create encryption config
-        let enc_config = EncryptConfig::new(
-            vec![1u8; 32], // 32-byte AES-256-GCM key
+        // Create temporary directory for test files
+        let temp_dir = tempfile::tempdir().unwrap();
+        let test_file = temp_dir.path().join("test.jwk");
+
+        // Generate Ed25519 key pair for signing
+        let rng = SystemRandom::new();
+        let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref()).unwrap();
+        let public_key = key_pair.public_key().as_ref().to_vec();
+
+        // Write key material to file
+        let jwk_content = serde_json::json!({
+            "keys": [
+                {
+                    "kty": "oct",
+                    "use": "enc",
+                    "key_ops": ["encrypt", "decrypt"],
+                    "alg": "aes256gcm",
+                    "kid": "test-enc-key",
+                    "k": BASE64.encode(vec![1u8; 32])
+                },
+                {
+                    "kty": "okp",
+                    "use": "sig",
+                    "key_ops": ["sign", "verify"],
+                    "alg": "ed25519",
+                    "kid": "test-sign-key",
+                    "x": BASE64.encode(public_key),
+                    "d": BASE64.encode(pkcs8_bytes.as_ref())
+                }
+            ]
+        });
+        fs::write(&test_file, serde_json::to_string_pretty(&jwk_content).unwrap()).unwrap();
+
+        // Create encryption key
+        let enc_key = KeyMaterial::new(
+            "oct".to_string(),
             "aes256gcm".to_string(),
-            "aes256gcm".to_string(),
+            Some("enc".to_string()),
+            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
+            Some("test-enc-key".to_string()),
+            Some(format!("file://{}", test_file.to_str().unwrap())),
             None,
-            None, // None means encrypt all tensors
-        );
+            None,
+            None,
+        ).unwrap();
+
+        // Create signing key
+        let sign_key = KeyMaterial::new(
+            "okp".to_string(),
+            "ed25519".to_string(),
+            Some("sig".to_string()),
+            Some(vec!["sign".to_string(), "verify".to_string()]),
+            Some("test-sign-key".to_string()),
+            Some(format!("file://{}", test_file.to_str().unwrap())),
+            None,
+            None,
+            None,
+        ).unwrap();
+
+        // Load keys
+        enc_key.load_key().unwrap();
+        sign_key.load_key().unwrap();
+
+        // Create serialization config
+        let serialize_config = SerializeCryptoConfig::new(
+            Some(vec!["attn.0".to_string()]),
+            enc_key,
+            sign_key,
+        ).unwrap();
 
         // Serialize and encrypt
-        let out = serialize(&metadata, &None, Some(&enc_config)).unwrap();
+        let out = serialize(&metadata, &None, Some(&serialize_config)).unwrap();
         
         // Deserialize and verify
-        let mut parsed = SafeTensors::deserialize(&out).unwrap();
-        
-        // Set decryption key
-        let decrypt_config = DecryptConfig::new(
-            enc_config.master_key.clone(),
-            None,
-        );
-        parsed.load_decrypt_config(Some(&decrypt_config)).unwrap();
+        let parsed = SafeTensors::deserialize(&out).unwrap();
         
         let tensor = parsed.tensor("attn.0").unwrap();
         
@@ -1410,6 +1469,9 @@ mod tests {
         assert_eq!(tensor.shape(), vec![1, 2, 3]);
         assert_eq!(tensor.dtype(), Dtype::F32);
         assert_eq!(tensor.data(), data.as_slice());
+
+        // Clean up test files
+        fs::remove_file(&test_file).unwrap();
     }
 
     /// Test suite for partial encryption functionality
@@ -1439,27 +1501,82 @@ mod tests {
         metadata.insert("tensor1".to_string(), tensor1);
         metadata.insert("tensor2".to_string(), tensor2);
 
-        // Create encryption config, only encrypt tensor1
-        let enc_config = EncryptConfig::new(
-            vec![1u8; 32], // 32-byte AES-256-GCM key
+        // Create temporary directory for test files
+        let temp_dir = tempfile::tempdir().unwrap();
+        let test_file = temp_dir.path().join("test.jwk");
+
+        // Generate Ed25519 key pair for signing
+        let rng = SystemRandom::new();
+        let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref()).unwrap();
+        let public_key = key_pair.public_key().as_ref().to_vec();
+
+        // Write key material to file
+        let jwk_content = serde_json::json!({
+            "keys": [
+                {
+                    "kty": "oct",
+                    "use": "enc",
+                    "key_ops": ["encrypt", "decrypt"],
+                    "alg": "aes256gcm",
+                    "kid": "test-enc-key",
+                    "k": BASE64.encode(vec![1u8; 32])
+                },
+                {
+                    "kty": "okp",
+                    "use": "sig",
+                    "key_ops": ["sign", "verify"],
+                    "alg": "ed25519",
+                    "kid": "test-sign-key",
+                    "x": BASE64.encode(public_key),
+                    "d": BASE64.encode(pkcs8_bytes.as_ref())
+                }
+            ]
+        });
+        fs::write(&test_file, serde_json::to_string_pretty(&jwk_content).unwrap()).unwrap();
+
+        // Create encryption key
+        let enc_key = KeyMaterial::new(
+            "oct".to_string(),
             "aes256gcm".to_string(),
-            "aes256gcm".to_string(),
+            Some("enc".to_string()),
+            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
+            Some("test-enc-key".to_string()),
+            Some(format!("file://{}", test_file.to_str().unwrap())),
             None,
-            Some(vec!["tensor1".to_string()]), // Only encrypt tensor1
-        );
+            None,
+            None,
+        ).unwrap();
+
+        // Create signing key
+        let sign_key = KeyMaterial::new(
+            "okp".to_string(),
+            "ed25519".to_string(),
+            Some("sig".to_string()),
+            Some(vec!["sign".to_string(), "verify".to_string()]),
+            Some("test-sign-key".to_string()),
+            Some(format!("file://{}", test_file.to_str().unwrap())),
+            None,
+            None,
+            None,
+        ).unwrap();
+
+        // Load keys
+        enc_key.load_key().unwrap();
+        sign_key.load_key().unwrap();
+
+        // Create serialization config
+        let serialize_config = SerializeCryptoConfig::new(
+            Some(vec!["tensor1".to_string()]),
+            enc_key,
+            sign_key,
+        ).unwrap();
 
         // Serialize and encrypt
-        let out = serialize(&metadata, &None, Some(&enc_config)).unwrap();
+        let out = serialize(&metadata, &None, Some(&serialize_config)).unwrap();
         
         // Deserialize and verify
-        let mut parsed = SafeTensors::deserialize(&out).unwrap();
-        
-        // Set decryption key
-        let decrypt_config = DecryptConfig::new(
-            enc_config.master_key.clone(),
-            None,
-        );
-        parsed.load_decrypt_config(Some(&decrypt_config)).unwrap();
+        let parsed = SafeTensors::deserialize(&out).unwrap();
         
         // Verify tensor1 (encrypted) is correctly decrypted
         let tensor1 = parsed.tensor("tensor1").unwrap();
@@ -1472,6 +1589,9 @@ mod tests {
         assert_eq!(tensor2.shape(), vec![1, 3]);
         assert_eq!(tensor2.dtype(), Dtype::F32);
         assert_eq!(tensor2.data(), data2.as_slice());
+
+        // Clean up test files
+        fs::remove_file(&test_file).unwrap();
     }
 
     /// Test suite for encryption metadata handling
@@ -1493,17 +1613,79 @@ mod tests {
         let metadata: HashMap<String, TensorView> =
             [("test_tensor".to_string(), tensor)].into_iter().collect();
 
-        // Create encryption config
-        let enc_config = EncryptConfig::new(
-            vec![1u8; 32], // 32-byte AES-256-GCM key
+        // Create temporary directory for test files
+        let temp_dir = tempfile::tempdir().unwrap();
+        let test_file = temp_dir.path().join("test.jwk");
+
+        // Generate Ed25519 key pair for signing
+        let rng = SystemRandom::new();
+        let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref()).unwrap();
+        let public_key = key_pair.public_key().as_ref().to_vec();
+
+        // Write key material to file
+        let jwk_content = serde_json::json!({
+            "keys": [
+                {
+                    "kty": "oct",
+                    "use": "enc",
+                    "key_ops": ["encrypt", "decrypt"],
+                    "alg": "aes256gcm",
+                    "kid": "test-enc-key",
+                    "k": BASE64.encode(vec![1u8; 32])
+                },
+                {
+                    "kty": "okp",
+                    "use": "sig",
+                    "key_ops": ["sign", "verify"],
+                    "alg": "ed25519",
+                    "kid": "test-sign-key",
+                    "x": BASE64.encode(public_key),
+                    "d": BASE64.encode(pkcs8_bytes.as_ref())
+                }
+            ]
+        });
+        fs::write(&test_file, serde_json::to_string_pretty(&jwk_content).unwrap()).unwrap();
+
+        // Create encryption key
+        let enc_key = KeyMaterial::new(
+            "oct".to_string(),
             "aes256gcm".to_string(),
-            "aes256gcm".to_string(),
-            Some("test-key-123".to_string()),
-            None, // None means encrypt all tensors
-        );
+            Some("enc".to_string()),
+            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
+            Some("test-enc-key".to_string()),
+            Some(format!("file://{}", test_file.to_str().unwrap())),
+            None,
+            None,
+            None,
+        ).unwrap();
+
+        // Create signing key
+        let sign_key = KeyMaterial::new(
+            "okp".to_string(),
+            "ed25519".to_string(),
+            Some("sig".to_string()),
+            Some(vec!["sign".to_string(), "verify".to_string()]),
+            Some("test-sign-key".to_string()),
+            Some(format!("file://{}", test_file.to_str().unwrap())),
+            None,
+            None,
+            None,
+        ).unwrap();
+
+        // Load keys
+        enc_key.load_key().unwrap();
+        sign_key.load_key().unwrap();
+
+        // Create serialization config
+        let serialize_config = SerializeCryptoConfig::new(
+            Some(vec!["test_tensor".to_string()]),
+            enc_key,
+            sign_key,
+        ).unwrap();
 
         // Serialize and encrypt
-        let out = serialize(&metadata, &None, Some(&enc_config)).unwrap();
+        let out = serialize(&metadata, &None, Some(&serialize_config)).unwrap();
         
         // Deserialize and verify metadata
         let parsed = SafeTensors::deserialize(&out).unwrap();
@@ -1517,6 +1699,9 @@ mod tests {
         } else {
             panic!("Metadata should contain encryption information");
         }
+
+        // Clean up test files
+        fs::remove_file(&test_file).unwrap();
     }
 
     #[test]
@@ -1534,25 +1719,44 @@ mod tests {
         let metadata: HashMap<String, TensorView> =
             [("attn.0".to_string(), attn_0)].into_iter().collect();
 
-        // Create encryption configuration
-        let enc_config = EncryptConfig::new(
-            vec![1u8; 32], // 32-byte AES-256-GCM key
+        // Create encryption key
+        let enc_key = KeyMaterial::new(
+            "oct".to_string(),
             "aes256gcm".to_string(),
-            "aes256gcm".to_string(),
+            Some("enc".to_string()),
+            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             None,
-            None, // None means encrypt all tensors
-        );
+            None,
+            Some(vec![1u8; 32]),
+            None,
+            None,
+        ).unwrap();
+
+        // Create signing key
+        let sign_key = KeyMaterial::new(
+            "okp".to_string(),
+            "ed25519".to_string(),
+            Some("sig".to_string()),
+            Some(vec!["sign".to_string(), "verify".to_string()]),
+            None,
+            None,
+            None,
+            Some(vec![2u8; 32]),
+            Some(vec![3u8; 32]),
+        ).unwrap();
+
+        // Create serialization config
+        let serialize_config = SerializeCryptoConfig::new(
+            Some(vec!["tensor1".to_string()]),
+            enc_key,
+            sign_key,
+        ).unwrap();
 
         // Serialize and encrypt
-        let out = serialize(&metadata, &None, Some(&enc_config)).unwrap();
+        let out = serialize(&metadata, &None, Some(&serialize_config)).unwrap();
         
         // Deserialize and set decryption key
-        let mut parsed = SafeTensors::deserialize(&out).unwrap();
-        let decrypt_config = DecryptConfig::new(
-            enc_config.master_key.clone(),
-            None,
-        );
-        parsed.load_decrypt_config(Some(&decrypt_config)).unwrap();
+        let parsed = SafeTensors::deserialize(&out).unwrap();
 
         // Test first slice operation
         let out_buffer: Vec<u8> = parsed

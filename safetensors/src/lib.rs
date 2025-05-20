@@ -29,11 +29,12 @@ mod lib {
         pub use alloc::string::{String, ToString};
         pub use alloc::vec::Vec;
         pub use hashbrown::HashMap;
+        pub use alloc::collections::BTreeMap;
     }
     #[cfg(feature = "std")]
     mod stds {
         pub use std::borrow::Cow;
-        pub use std::collections::HashMap;
+        pub use std::collections::{HashMap, BTreeMap};
         pub use std::string::{String, ToString};
         pub use std::vec::Vec;
     }
