@@ -1,7 +1,11 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use safetensors::tensor::*;
-use safetensors::crypto::{EncryptConfig, DecryptConfig};
+use safetensors::crypto::{KeyMaterial, SerializeCryptoConfig};
 use std::collections::HashMap;
+use ring::signature::{Ed25519KeyPair, KeyPair};
+use ring::rand::SystemRandom;
+use std::fs;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 // Returns a sample data of size 2_MB
 fn get_sample_data() -> (Vec<u8>, Vec<usize>, Dtype) {
@@ -13,32 +17,88 @@ fn get_sample_data() -> (Vec<u8>, Vec<usize>, Dtype) {
     (data, shape, dtype)
 }
 
+// Generate Ed25519 key pair
+fn generate_ed25519_keypair() -> (Vec<u8>, Vec<u8>) {
+    let rng = SystemRandom::new();
+    let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref()).unwrap();
+    let public_key = key_pair.public_key().as_ref().to_vec();
+    let private_key = pkcs8_bytes.as_ref().to_vec();
+    (public_key, private_key)
+}
+
+// Generate JWK file for a given key pair
+fn generate_jwk_file(enc_key: &[u8], sign_pub_key: &[u8], sign_priv_key: &[u8], kid: &str, enc_alg: &str) -> String {
+    let jwk = format!(
+        r#"{{
+            "keys": [
+                {{
+                    "kty": "oct",
+                    "use": "enc",
+                    "key_ops": ["encrypt", "decrypt"],
+                    "alg": "{}",
+                    "k": "{}",
+                    "kid": "{}_enc"
+                }},
+                {{
+                    "kty": "okp",
+                    "use": "sig",
+                    "key_ops": ["sign", "verify"],
+                    "alg": "Ed25519",
+                    "x": "{}",
+                    "d": "{}",
+                    "kid": "{}_sig"
+                }}
+            ]
+        }}"#,
+        enc_alg,
+        BASE64.encode(enc_key),
+        kid,
+        BASE64.encode(sign_pub_key),
+        BASE64.encode(sign_priv_key),
+        kid
+    );
+    jwk
+}
+
 // Benchmark performance of different encryption algorithms with varying encryption ratios
 fn bench_encryption_performance(c: &mut Criterion) {
     let (data, shape, dtype) = get_sample_data();
     let n_layers = 5;
     let algorithms = [
-        ("AES-128-GCM", "aes128gcm", "aes128gcm", 16),
-        ("AES-256-GCM", "aes256gcm", "aes256gcm", 32),
-        ("ChaCha20-Poly1305", "chacha20poly1305", "chacha20poly1305", 32),
+        ("AES-128-GCM", "aes128gcm", 16),
+        ("AES-256-GCM", "aes256gcm", 32),
+        ("ChaCha20-Poly1305", "chacha20poly1305", 32),
     ];
 
     let ratios = [
         ("0%", 0),   // No encryption
         ("20%", 1),  // Encrypt 1 tensor
-        ("40%", 2),  // Encrypt 2 tensors
-        ("60%", 3),  // Encrypt 3 tensors
-        ("80%", 4),  // Encrypt 4 tensors
-        ("100%", 5), // Encrypt all tensors
+        // ("40%", 2),  // Encrypt 2 tensors
+        // ("60%", 3),  // Encrypt 3 tensors
+        // ("80%", 4),  // Encrypt 4 tensors
+        // ("100%", 5), // Encrypt all tensors
     ];
 
-    let mut group = c.benchmark_group("encryption_performance");
+    let mut group = c.benchmark_group("Serialize 10_MB CryptoTensor");
     group.measurement_time(std::time::Duration::from_secs(30));
     group.plot_config(criterion::PlotConfiguration::default()
         .summary_scale(criterion::AxisScale::Logarithmic));
 
-    for (algo_name, key_algo, data_algo, key_size) in algorithms.iter() {
+    // Create a temporary directory for JWK files
+    let temp_dir = std::env::temp_dir().join("safetensors_benchmark_jwk");
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    for (algo_name, key_algo, key_size) in algorithms.iter() {
         let master_key = vec![1u8; *key_size];
+        let (sign_pub_key, sign_priv_key) = generate_ed25519_keypair();
+        
+        // Generate JWK file for this algorithm
+        let jwk_content = generate_jwk_file(&master_key, &sign_pub_key, &sign_priv_key, algo_name, key_algo);
+        let jwk_path = temp_dir.join(format!("{}.jwk", algo_name));
+        fs::write(&jwk_path, jwk_content).unwrap();
+        let jku = format!("file://{}", jwk_path.to_str().unwrap());
+
         for (ratio_name, n_encrypted) in ratios.iter() {
             let mut metadata: HashMap<String, TensorView> = HashMap::new();
             for i in 0..n_layers {
@@ -51,13 +111,35 @@ fn bench_encryption_performance(c: &mut Criterion) {
                 .map(|i| format!("weight{i}"))
                 .collect();
 
-            let enc_config = EncryptConfig::new(
-                master_key.clone(),
+            let enc_key = KeyMaterial::new(
+                "oct".to_string(),
                 key_algo.to_string(),
-                data_algo.to_string(),
+                Some("enc".to_string()),
+                Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
+                Some(format!("{}_enc", algo_name)),
+                Some(jku.clone()),
+                Some(master_key.clone()),
                 None,
+                None,
+            ).unwrap();
+
+            let sign_key = KeyMaterial::new(
+                "okp".to_string(),
+                "Ed25519".to_string(),
+                Some("sig".to_string()),
+                Some(vec!["sign".to_string(), "verify".to_string()]),
+                Some(format!("{}_sig", algo_name)),
+                Some(jku.clone()),
+                None,
+                Some(sign_pub_key.clone()),
+                Some(sign_priv_key.clone()),
+            ).unwrap();
+
+            let crypto_config = SerializeCryptoConfig::new(
                 Some(tensors_to_encrypt),
-            );
+                enc_key,
+                sign_key,
+            ).unwrap();
 
             let benchmark_id = BenchmarkId::new(
                 format!("{}", algo_name),
@@ -66,11 +148,14 @@ fn bench_encryption_performance(c: &mut Criterion) {
 
             group.bench_with_input(benchmark_id, &metadata, |b, metadata| {
                 b.iter(|| {
-                    let _serialized = serialize(black_box(metadata), black_box(&None), Some(&enc_config));
+                    let _serialized = serialize(black_box(metadata), black_box(&None), Some(&crypto_config));
                 })
             });
         }
     }
+
+    // Clean up temporary directory
+    fs::remove_dir_all(temp_dir).unwrap();
     group.finish();
 }
 
@@ -79,46 +164,81 @@ fn bench_decryption_performance(c: &mut Criterion) {
     let (data, shape, dtype) = get_sample_data();
     let n_layers = 5;
     let algorithms = [
-        ("AES-128-GCM", "aes128gcm", "aes128gcm", 16),
-        ("AES-256-GCM", "aes256gcm", "aes256gcm", 32),
-        ("ChaCha20-Poly1305", "chacha20poly1305", "chacha20poly1305", 32),
+        ("AES-128-GCM", "aes128gcm", 16),
+        ("AES-256-GCM", "aes256gcm", 32),
+        ("ChaCha20-Poly1305", "chacha20poly1305", 32),
     ];
 
-    let mut group = c.benchmark_group("decryption_performance");
-    group.measurement_time(std::time::Duration::from_secs(30)); // target measurement time
+    let mut group = c.benchmark_group("Deserialize 10_MB CryptoTensor");
+    group.measurement_time(std::time::Duration::from_secs(30));
     group.plot_config(criterion::PlotConfiguration::default()
         .summary_scale(criterion::AxisScale::Logarithmic));
 
-    for (algo_name, key_algo, data_algo, key_size) in algorithms.iter() {
+    // Create a temporary directory for JWK files
+    let temp_dir = std::env::temp_dir().join("safetensors_benchmark_jwk");
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    for (algo_name, key_algo, key_size) in algorithms.iter() {
         let master_key = vec![1u8; *key_size];
+        let (sign_pub_key, sign_priv_key) = generate_ed25519_keypair();
+        
+        // Generate JWK file for this algorithm
+        let jwk_content = generate_jwk_file(&master_key, &sign_pub_key, &sign_priv_key, algo_name, key_algo);
+        let jwk_path = temp_dir.join(format!("{}.jwk", algo_name));
+        fs::write(&jwk_path, jwk_content).unwrap();
+        let jku = format!("file://{}", jwk_path.to_str().unwrap());
+
         let mut metadata: HashMap<String, TensorView> = HashMap::new();
         for i in 0..n_layers {
             let tensor = TensorView::new(dtype, shape.clone(), &data[..]).unwrap();
             metadata.insert(format!("weight{i}"), tensor);
         }
 
-        let enc_config = EncryptConfig::new(
-            master_key.clone(),
+        let enc_key = KeyMaterial::new(
+            "oct".to_string(),
             key_algo.to_string(),
-            data_algo.to_string(),
+            Some("enc".to_string()),
+            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
+            Some(format!("{}_enc", algo_name)),
+            Some(jku.clone()),
+            Some(master_key.clone()),
             None,
             None,
-        );
+        ).unwrap();
 
-        let serialized = serialize(&metadata, &None, Some(&enc_config)).unwrap();
-        let decrypt_config = DecryptConfig::new(master_key.clone(), None);
+        let sign_key = KeyMaterial::new(
+            "okp".to_string(),
+            "Ed25519".to_string(),
+            Some("sig".to_string()),
+            Some(vec!["sign".to_string(), "verify".to_string()]),
+            Some(format!("{}_sig", algo_name)),
+            Some(jku.clone()),
+            None,
+            Some(sign_pub_key.clone()),
+            Some(sign_priv_key.clone()),
+        ).unwrap();
+
+        let crypto_config = SerializeCryptoConfig::new(
+            None,
+            enc_key,
+            sign_key,
+        ).unwrap();
+
+        let serialized = serialize(&metadata, &None, Some(&crypto_config)).unwrap();
 
         group.bench_with_input(
             BenchmarkId::new("decryption", algo_name),
             &serialized,
             |b, serialized| {
                 b.iter(|| {
-                    let mut tensors = SafeTensors::deserialize(black_box(serialized)).unwrap();
-                    tensors.load_decrypt_config(Some(&decrypt_config)).unwrap();
+                    let _tensors = SafeTensors::deserialize(black_box(serialized)).unwrap();
                 })
             },
         );
     }
+
+    // Clean up temporary directory
+    fs::remove_dir_all(temp_dir).unwrap();
     group.finish();
 }
 
