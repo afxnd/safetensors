@@ -817,7 +817,7 @@ mod tests {
     use proptest::prelude::*;
     #[cfg(not(feature = "std"))]
     extern crate std;
-    use crate::crypto::KeyMaterial;
+    use crate::crypto::{KeyMaterial, LoadPolicy};
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     #[cfg(feature = "std")]
@@ -1451,10 +1451,12 @@ mod tests {
         sign_key.load_key().unwrap();
 
         // Create serialization config
+        let dummy_policy = LoadPolicy::new(None, None);
         let serialize_config = SerializeCryptoConfig::new(
             Some(vec!["attn.0".to_string()]),
             enc_key,
             sign_key,
+            dummy_policy,
         ).unwrap();
 
         // Serialize and encrypt
@@ -1566,10 +1568,12 @@ mod tests {
         sign_key.load_key().unwrap();
 
         // Create serialization config
+        let dummy_policy = LoadPolicy::new(None, None);
         let serialize_config = SerializeCryptoConfig::new(
             Some(vec!["tensor1".to_string()]),
             enc_key,
             sign_key,
+            dummy_policy,
         ).unwrap();
 
         // Serialize and encrypt
@@ -1678,10 +1682,12 @@ mod tests {
         sign_key.load_key().unwrap();
 
         // Create serialization config
+        let dummy_policy = LoadPolicy::new(None, None);
         let serialize_config = SerializeCryptoConfig::new(
             Some(vec!["test_tensor".to_string()]),
             enc_key,
             sign_key,
+            dummy_policy,
         ).unwrap();
 
         // Serialize and encrypt
@@ -1746,10 +1752,12 @@ mod tests {
         ).unwrap();
 
         // Create serialization config
+        let dummy_policy = LoadPolicy::new(None, None);
         let serialize_config = SerializeCryptoConfig::new(
             Some(vec!["tensor1".to_string()]),
             enc_key,
             sign_key,
+            dummy_policy,
         ).unwrap();
 
         // Serialize and encrypt

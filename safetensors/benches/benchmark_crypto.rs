@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use safetensors::tensor::*;
-use safetensors::crypto::{KeyMaterial, SerializeCryptoConfig};
+use safetensors::crypto::{KeyMaterial, SerializeCryptoConfig, LoadPolicy};
 use std::collections::HashMap;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use ring::rand::SystemRandom;
@@ -135,10 +135,12 @@ fn bench_encryption_performance(c: &mut Criterion) {
                 Some(sign_priv_key.clone()),
             ).unwrap();
 
+            let dummy_policy = LoadPolicy::new(None, None);
             let crypto_config = SerializeCryptoConfig::new(
                 Some(tensors_to_encrypt),
                 enc_key,
                 sign_key,
+                dummy_policy,
             ).unwrap();
 
             let benchmark_id = BenchmarkId::new(
@@ -218,10 +220,12 @@ fn bench_decryption_performance(c: &mut Criterion) {
             Some(sign_priv_key.clone()),
         ).unwrap();
 
+        let dummy_policy = LoadPolicy::new(None, None);
         let crypto_config = SerializeCryptoConfig::new(
             None,
             enc_key,
             sign_key,
+            dummy_policy,
         ).unwrap();
 
         let serialized = serialize(&metadata, &None, Some(&crypto_config)).unwrap();

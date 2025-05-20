@@ -10,6 +10,7 @@ use std::rc::Rc;
 use zeroize::Zeroizing;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use std::path::Path;
+use regorus::Engine;
 
 /// Error types that can occur during cryptographic operations
 #[derive(Debug)]
@@ -91,6 +92,8 @@ pub enum CryptoTensorError {
     NoSuitableKey,
     /// Multiple keys found without kid
     MultipleKeysWithoutKid,
+    /// Policy相关错误
+    Policy(String),
 }
 
 impl fmt::Display for CryptoTensorError {
@@ -187,6 +190,9 @@ impl fmt::Display for CryptoTensorError {
             }
             CryptoTensorError::MultipleKeysWithoutKid => {
                 write!(f, "Multiple keys found without kid")
+            }
+            CryptoTensorError::Policy(msg) => {
+                write!(f, "Policy error: {}", msg)
             }
         }
     }
@@ -659,14 +665,21 @@ pub struct SerializeCryptoConfig {
     enc_key: KeyMaterial,
     /// The key material for signing
     sign_key: KeyMaterial,
+    /// Policy for model loading and KMS validation
+    policy: LoadPolicy,
 }
 
 impl SerializeCryptoConfig {
     /// Create a new configuration for serializing tensors with encryption
-    pub fn new(tensors: Option<Vec<String>>, enc_key: KeyMaterial, sign_key: KeyMaterial) -> Result<Self, CryptoTensorError> {
+    pub fn new(
+        tensors: Option<Vec<String>>,
+        enc_key: KeyMaterial,
+        sign_key: KeyMaterial,
+        policy: LoadPolicy,
+    ) -> Result<Self, CryptoTensorError> {
         enc_key.validate(ValidateMode::Save)?;
         sign_key.validate(ValidateMode::Save)?;
-        Ok(Self { tensors, enc_key, sign_key })
+        Ok(Self { tensors, enc_key, sign_key, policy })
     }
 }
 
@@ -1281,6 +1294,56 @@ impl HeaderSigner {
     }
 }
 
+/// Policy for tensor model loading and remote KMS validation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadPolicy {
+    /// OPA policy content for tensor model loading validation
+    #[serde(rename = "local")]
+    local_policy: String,
+    
+    /// OPA policy content for KMS key release validation
+    #[serde(rename = "remote")]
+    remote_policy: String,
+}
+
+impl LoadPolicy {
+    /// Create a new LoadPolicy
+    pub fn new(local: Option<String>, remote: Option<String>) -> Self {
+        let default_policy = "package model\nallow = true".to_string();
+        Self {
+            local_policy: local.unwrap_or_else(|| default_policy.clone()),
+            remote_policy: remote.unwrap_or(default_policy),
+        }
+    }
+
+    /// Validate tensor model loading using local Rego policy
+    /// Currently does not validate based on input; input parameter is reserved for future use.
+    pub fn evaluate(&self, _input: String) -> Result<bool, CryptoTensorError> {
+        let mut engine = Engine::new();
+        // Load local policy
+        engine
+            .add_policy(String::from("model.rego"), self.local_policy.clone())
+            .map_err(|e| CryptoTensorError::Policy(format!("Failed to add policy: {e}")))?;
+
+        // Input parsing and setting will be implemented in the future
+        // let input_value = regorus::Value::from_json_str(&input)
+        //     .map_err(|e| CryptoTensorError::Policy(format!("Invalid input JSON: {e}")))?;
+        // engine.set_input(input_value);
+
+        // Evaluate policy rule
+        let result = engine
+            .eval_rule(String::from("data.model.allow"))
+            .map_err(|e| CryptoTensorError::Policy(format!("Policy evaluation failed: {e}")))?;
+
+        // Parse result
+        match result {
+            regorus::Value::Bool(allowed) => Ok(allowed),
+            regorus::Value::Undefined => Err(CryptoTensorError::Policy("Policy returned undefined".to_string())),
+            _ => Err(CryptoTensorError::Policy("Policy did not return a boolean".to_string())),
+        }
+    }
+}
+
 /// Manager for handling encryption and decryption of multiple tensors
 #[derive(Debug)]
 pub struct CryptoTensor<'data> {
@@ -1292,6 +1355,8 @@ pub struct CryptoTensor<'data> {
     enc_key: KeyMaterial,
     /// Key material for signing/verification
     sign_key: KeyMaterial,
+    /// Policy for model loading and KMS validation
+    policy: LoadPolicy,
 }
 
 impl<'data> CryptoTensor<'data> {
@@ -1357,6 +1422,7 @@ impl<'data> CryptoTensor<'data> {
             enc_key: config.enc_key.clone(),
             sign_key: config.sign_key.clone(),
             signer,
+            policy: config.policy.clone(),
         }))
     }
 
@@ -1398,6 +1464,11 @@ impl<'data> CryptoTensor<'data> {
             .map_err(|e| CryptoTensorError::Encryption(e.to_string()))?;
         new_metadata.insert("__encryption__".to_string(), crypto_json);
 
+        // Add policy information
+        let policy_json = serde_json::to_string(&self.policy)
+            .map_err(|e| CryptoTensorError::Encryption(e.to_string()))?;
+        new_metadata.insert("__policy__".to_string(), policy_json);
+
         // Add signature information
         let header = Metadata::new(Some(new_metadata.clone()), tensors)?;
         let header_json = serde_json::to_string(&header)?;
@@ -1437,6 +1508,8 @@ impl<'data> CryptoTensor<'data> {
         let signature_hex = metadata
             .get("__signature__")
             .ok_or_else(|| CryptoTensorError::MissingSignature("Missing __signature__ in metadata".to_string()))?;
+        let policy_str = metadata.get("__policy__")
+            .ok_or_else(|| CryptoTensorError::Policy("Missing __policy__ in metadata".to_string()))?;
 
         // Parse key materials
         let key_materials: serde_json::Value = serde_json::from_str(key_materials)
@@ -1467,6 +1540,13 @@ impl<'data> CryptoTensor<'data> {
             return Err(CryptoTensorError::Verification("Signature verification failed".to_string()));
         }
 
+        // Verify policy
+        let policy: LoadPolicy = serde_json::from_str(policy_str)
+            .map_err(|e| CryptoTensorError::Policy(format!("Failed to parse policy: {}", e)))?;
+        if !policy.evaluate(String::new())? {
+            return Err(CryptoTensorError::Policy("Policy evaluation denied".to_string()));
+        }
+
         // Initialize cryptors after verification
         enc_key.load_key()?;
         let master_key: Rc<[u8]> = if let Some(Some(k)) = enc_key.k.get() {
@@ -1489,6 +1569,7 @@ impl<'data> CryptoTensor<'data> {
             signer,
             enc_key,
             sign_key,
+            policy,
         }))
     }
 
@@ -2502,10 +2583,12 @@ mod tests {
             .map_err(|e| CryptoTensorError::KeyLoad { source: e.to_string() })?;
 
         // Create serialization configuration
+        let dummy_policy = LoadPolicy::new(None, None);
         let config = SerializeCryptoConfig::new(
             Some(vec!["tensor1".to_string()]),
             enc_key,
             sign_key,
+            dummy_policy,
         )?;
 
         // Initialize CryptoTensor from serialization config
