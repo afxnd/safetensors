@@ -2515,6 +2515,74 @@ mod tests {
         Ok(())
     }
 
+    /// Format JSON value, supports nested structure
+    fn format_json_value(value: &serde_json::Value, indent: usize, key: Option<&str>) -> String {
+        const BYTE_FIELDS: &[&str] = &["iv", "tag", "key_iv", "key_tag", "wrapped_key"];
+        match value {
+            serde_json::Value::Object(map) => {
+                let indent_str = " ".repeat(indent);
+                let mut result = String::from("{\n");
+                let mut first = true;
+                for (k, val) in map {
+                    if !first {
+                        result.push_str(",\n");
+                    }
+                    first = false;
+                    result.push_str(&format!(
+                        "{}  \"{}\": {}",
+                        indent_str,
+                        k,
+                        format_json_value(val, indent + 2, Some(k))
+                    ));
+                }
+                format!("{}\n{}}}", result, indent_str)
+            }
+            serde_json::Value::Array(arr) => {
+                if let Some(k) = key {
+                    if BYTE_FIELDS.contains(&k) {
+                        return format!("[{} bytes array]", arr.len());
+                    }
+                }
+                if arr.len() > 16 && arr.iter().all(|v| v.is_number()) {
+                    format!("[{} bytes array]", arr.len())
+                } else {
+                    let indent_str = " ".repeat(indent);
+                    let mut result = String::from("[\n");
+                    let mut first = true;
+                    for val in arr {
+                        if !first {
+                            result.push_str(",\n");
+                        }
+                        first = false;
+                        result.push_str(&format!(
+                            "{}  {}",
+                            indent_str,
+                            format_json_value(val, indent + 2, None)
+                        ));
+                    }
+                    format!("{}\n{}]", result, indent_str)
+                }
+            }
+            serde_json::Value::String(s) => {
+                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(s) {
+                    format_json_value(&json_val, indent, None)
+                } else if s.contains('\n') {
+                    format!("\"{}\"", s.replace('\n', "\\n"))
+                } else {
+                    format!("\"{}\"", s)
+                }
+            }
+            _ => value.to_string(),
+        }
+    }
+
+    /// Print formatted JSON object
+    fn print_formatted_json(title: &str, value: &serde_json::Value) {
+        println!("\n=== {} ===", title);
+        println!("{}", format_json_value(value, 0, None));
+        println!("=== End of {} ===\n", title);
+    }
+
     /// Test the complete flow of CryptoTensor
     #[test]
     fn test_crypto_tensor_complete_flow() -> Result<(), CryptoTensorError> {
@@ -2624,6 +2692,10 @@ mod tests {
 
         // Create new Metadata with the generated metadata
         let header = Metadata::new(Some(metadata), tensors)?;
+
+        // Print formatted complete header
+        let header_json = serde_json::to_value(&header).unwrap();
+        print_formatted_json("Complete Header", &header_json);
 
         // Create new CryptoTensor from header
         let new_crypto_tensor = CryptoTensor::from_header(&header)?.unwrap();
