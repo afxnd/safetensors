@@ -552,3 +552,76 @@ def _flatten(tensors: Dict[str, torch.Tensor]) -> Dict[str, Dict[str, Any]]:
         }
         for k, v in tensors.items()
     }
+
+
+def save_crypto(
+    tensors: Dict[str, torch.Tensor],
+    metadata: Optional[Dict[str, str]] = None,
+    config: Optional[dict] = None
+) -> bytes:
+    """
+    Saves a dictionary of tensors into encrypted raw bytes in safetensors format.
+
+    Args:
+        tensors (Dict[str, torch.Tensor]):
+            The input tensors. Tensors must be contiguous and dense.
+        metadata (Optional[Dict[str, str]], optional):
+            Optional text-only metadata to save in the header.
+        config (Optional[dict], optional):
+            Encryption configuration, must include encryption/signature keys, etc.
+
+    Returns:
+        bytes: The encrypted safetensors format raw bytes.
+
+    Example:
+        >>> from safetensors.torch import save_crypto
+        >>> import torch
+        >>> tensors = {"embedding": torch.zeros((512, 1024)), "attention": torch.zeros((256, 256))}
+        >>> config = {"enc_key": {...}, "sign_key": {...}}
+        >>> byte_data = save_crypto(tensors, config=config)
+    """
+    from safetensors import serialize_crypto
+    flattened = _flatten(tensors)
+    try:
+        serialized = serialize_crypto(flattened, metadata=metadata, config=config)
+        result = bytes(serialized)
+        return result
+    except Exception as e:
+        raise RuntimeError(f"Failed to encrypt and serialize tensors: {e}")
+
+
+def save_file_crypto(
+    tensors: Dict[str, torch.Tensor],
+    filename: Union[str, os.PathLike],
+    metadata: Optional[Dict[str, str]] = None,
+    config: Optional[dict] = None
+) -> None:
+    """
+    Saves a dictionary of tensors into an encrypted safetensors file.
+
+    Args:
+        tensors (Dict[str, torch.Tensor]):
+            The input tensors. Tensors must be contiguous and dense.
+        filename (str or os.PathLike):
+            The filename to save into.
+        metadata (Optional[Dict[str, str]], optional):
+            Optional text-only metadata to save in the header.
+        config (Optional[dict], optional):
+            Encryption configuration, must include encryption/signature keys, etc.
+
+    Returns:
+        None
+
+    Example:
+        >>> from safetensors.torch import save_file_crypto
+        >>> import torch
+        >>> tensors = {"embedding": torch.zeros((512, 1024)), "attention": torch.zeros((256, 256))}
+        >>> config = {"enc_key": {...}, "sign_key": {...}}
+        >>> save_file_crypto(tensors, "model.safetensors", config=config)
+    """
+    from safetensors import serialize_file_crypto
+    flattened = _flatten(tensors)
+    try:
+        serialize_file_crypto(flattened, filename, metadata=metadata, config=config)
+    except Exception as e:
+        raise RuntimeError(f"Failed to encrypt and save tensors to file: {e}")

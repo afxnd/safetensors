@@ -6,7 +6,7 @@ use ring::{aead, rand::{self, SecureRandom}};
 use serde::{Deserialize, Serialize, de::Error, Deserializer};
 use std::collections::HashMap;
 use std::fmt;
-use std::rc::Rc;
+use std::sync::Arc;
 use zeroize::Zeroizing;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use std::path::Path;
@@ -1020,7 +1020,7 @@ fn verify_signature(
 
 /// Information about encrypted tensor data and methods for encryption/decryption
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TensorCryptor<'data> {
+pub struct TensorCryptor<'data> {
     /// Algorithm used for encryption
     #[serde(skip)]
     enc_algo: String,
@@ -1039,7 +1039,7 @@ struct TensorCryptor<'data> {
     buffer: OnceCell<Vec<u8>>,
     /// Master key for key encryption/decryption
     #[serde(skip)]
-    master_key: Rc<[u8]>,
+    master_key: Arc<[u8]>,
     /// Phantom data for lifetime tracking
     #[serde(skip)]
     _phantom: std::marker::PhantomData<&'data ()>,
@@ -1069,7 +1069,7 @@ impl<'data> TensorCryptor<'data> {
                     iv: Vec::new(),
                     tag: Vec::new(),
                     buffer: OnceCell::new(),
-                    master_key: Rc::from(decoded_key),
+                    master_key: Arc::from(decoded_key),
                     _phantom: std::marker::PhantomData,
                 })
             } else {
@@ -1169,7 +1169,7 @@ impl<'data> TensorCryptor<'data> {
     ///
     /// * `KeyUnwrap` - If key unwrapping fails
     /// * `Decryption` - If data decryption fails
-    fn decrypt(&'data self, data: &[u8]) -> Result<&'data [u8], CryptoTensorError> {
+    pub fn decrypt(&'data self, data: &[u8]) -> Result<&'data [u8], CryptoTensorError> {
         self.buffer
             .get_or_try_init(|| {
                 let data_key = Zeroizing::new(self.unwrap_key()?);
@@ -1361,7 +1361,7 @@ pub struct CryptoTensor<'data> {
 
 impl<'data> CryptoTensor<'data> {
     /// Get the encryptor for a specific tensor
-    fn get(&self, tensor_name: &str) -> Option<&TensorCryptor<'data>> {
+    pub fn get(&self, tensor_name: &str) -> Option<&TensorCryptor<'data>> {
         self.cryptors.get(tensor_name)
     }
 
@@ -1549,10 +1549,9 @@ impl<'data> CryptoTensor<'data> {
 
         // Initialize cryptors after verification
         enc_key.load_key()?;
-        let master_key: Rc<[u8]> = if let Some(Some(k)) = enc_key.k.get() {
-            let decoded_key = BASE64.decode(k)
-                .map_err(|e| CryptoTensorError::KeyCreation(format!("Failed to decode base64 key: {}", e)))?;
-            Rc::from(decoded_key)
+        let master_key: Arc<[u8]> = if let Some(Some(k)) = enc_key.k.get() {
+            Arc::from(BASE64.decode(k)
+                .map_err(|e| CryptoTensorError::KeyCreation(format!("Failed to decode base64 key: {}", e)))?)
         } else {
             return Err(CryptoTensorError::MissingMasterKey);
         };

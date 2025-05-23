@@ -53,6 +53,42 @@ def serialize_file(tensor_dict, filename, metadata=None):
     """
     pass
 
+def serialize_crypto(tensor_dict: dict, metadata: dict = ..., config: dict = ...) -> bytes:
+    """
+    Serializes raw data as encrypted CryptoTensor.
+
+    Args:
+        tensor_dict (Dict[str, Dict[Any]]):
+            The tensor dict, e.g. {"tensor_name": {"dtype": "F32", "shape": [2, 3], "data": b"..."}}
+        metadata (Optional[Dict[str, str]]):
+            Optional text-only annotations.
+        config (Optional[dict]):
+            Encryption configuration, must include encryption/signature keys, etc.
+
+    Returns:
+        bytes: The encrypted safetensors format raw bytes.
+    """
+    ...
+
+def serialize_file_crypto(tensor_dict: dict, filename, metadata: dict = ..., config: dict = ...) -> None:
+    """
+    Serializes raw data as encrypted CryptoTensor and writes to file.
+
+    Args:
+        tensor_dict (Dict[str, Dict[Any]]):
+            The tensor dict, e.g. {"tensor_name": {"dtype": "F32", "shape": [2, 3], "data": b"..."}}
+        filename (str or os.PathLike):
+            The name of the file to write into.
+        metadata (Optional[Dict[str, str]]):
+            Optional text-only annotations.
+        config (Optional[dict]):
+            Encryption configuration, must include encryption/signature keys, etc.
+
+    Returns:
+        None
+    """
+    ...
+
 class safe_open:
     """
     Opens a safetensors lazily and returns tensors as asked

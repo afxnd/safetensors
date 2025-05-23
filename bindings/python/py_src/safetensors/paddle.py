@@ -136,3 +136,68 @@ def _paddle2np(paddle_dict: Dict[str, paddle.Tensor]) -> Dict[str, np.array]:
     for k, v in paddle_dict.items():
         paddle_dict[k] = v.detach().cpu().numpy()
     return paddle_dict
+
+
+def save_crypto(
+    tensors: Dict[str, paddle.Tensor],
+    metadata: Optional[Dict[str, str]] = None,
+    config: Optional[dict] = None
+) -> bytes:
+    """
+    Saves a dictionary of tensors into encrypted raw bytes in safetensors format.
+
+    Args:
+        tensors (Dict[str, paddle.Tensor]):
+            The input tensors. Tensors must be contiguous and dense.
+        metadata (Optional[Dict[str, str]], optional):
+            Optional text-only metadata to save in the header.
+        config (Optional[dict], optional):
+            Encryption configuration, must include encryption/signature keys, etc.
+
+    Returns:
+        bytes: The encrypted safetensors format raw bytes.
+
+    Example:
+        >>> from safetensors.paddle import save_crypto
+        >>> import paddle
+        >>> tensors = {"embedding": paddle.zeros((512, 1024)), "attention": paddle.zeros((256, 256))}
+        >>> config = {"enc_key": {...}, "sign_key": {...}}
+        >>> byte_data = save_crypto(tensors, config=config)
+    """
+    np_tensors = _paddle2np(tensors)
+    from safetensors import numpy as st_numpy
+    return st_numpy.save_crypto(np_tensors, metadata=metadata, config=config)
+
+
+def save_file_crypto(
+    tensors: Dict[str, paddle.Tensor],
+    filename: Union[str, os.PathLike],
+    metadata: Optional[Dict[str, str]] = None,
+    config: Optional[dict] = None
+) -> None:
+    """
+    Saves a dictionary of tensors into an encrypted safetensors file.
+
+    Args:
+        tensors (Dict[str, paddle.Tensor]):
+            The input tensors. Tensors must be contiguous and dense.
+        filename (str or os.PathLike):
+            The filename to save into.
+        metadata (Optional[Dict[str, str]], optional):
+            Optional text-only metadata to save in the header.
+        config (Optional[dict], optional):
+            Encryption configuration, must include encryption/signature keys, etc.
+
+    Returns:
+        None
+
+    Example:
+        >>> from safetensors.paddle import save_file_crypto
+        >>> import paddle
+        >>> tensors = {"embedding": paddle.zeros((512, 1024)), "attention": paddle.zeros((256, 256))}
+        >>> config = {"enc_key": {...}, "sign_key": {...}}
+        >>> save_file_crypto(tensors, "model.safetensors", config=config)
+    """
+    np_tensors = _paddle2np(tensors)
+    from safetensors import numpy as st_numpy
+    return st_numpy.save_file_crypto(np_tensors, filename, metadata=metadata, config=config)

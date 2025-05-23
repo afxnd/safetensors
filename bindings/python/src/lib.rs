@@ -18,6 +18,7 @@ use std::ops::Bound;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use safetensors::crypto::{SerializeCryptoConfig, KeyMaterial, LoadPolicy, CryptoTensor, TensorCryptor};
 
 static TORCH_MODULE: OnceLock<Py<PyModule>> = OnceLock::new();
 static NUMPY_MODULE: OnceLock<Py<PyModule>> = OnceLock::new();
@@ -119,7 +120,7 @@ fn serialize<'b>(
     metadata: Option<HashMap<String, String>>,
 ) -> PyResult<PyBound<'b, PyBytes>> {
     let tensors = prepare(tensor_dict)?;
-    let out = safetensors::tensor::serialize(&tensors, &metadata)
+    let out = safetensors::tensor::serialize(&tensors, &metadata, None)
         .map_err(|e| SafetensorError::new_err(format!("Error while serializing: {e:?}")))?;
     let pybytes = PyBytes::new(py, &out);
     Ok(pybytes)
@@ -147,8 +148,131 @@ fn serialize_file(
     metadata: Option<HashMap<String, String>>,
 ) -> PyResult<()> {
     let tensors = prepare(tensor_dict)?;
-    safetensors::tensor::serialize_to_file(&tensors, &metadata, filename.as_path())
+    safetensors::tensor::serialize_to_file(&tensors, &metadata, filename.as_path(), None)
         .map_err(|e| SafetensorError::new_err(format!("Error while serializing: {e:?}")))?;
+    Ok(())
+}
+
+fn prepare_crypto(config: Option<PyBound<PyAny>>) -> PyResult<Option<SerializeCryptoConfig>> {
+    let Some(config) = config else { return Ok(None); };
+    if config.is_instance_of::<pyo3::types::PyNone>() {
+        return Ok(None);
+    }
+    let config_dict = config.downcast::<PyDict>()?;
+
+    // tensors: Optional[List[str]]
+    let tensors = match config_dict.get_item("tensors")? {
+        Some(val) => Some(val.extract::<Vec<String>>()?),
+        None => None,
+    };
+
+    // enc_key: dict
+    let enc_key_any = config_dict.get_item("enc_key")?
+        .ok_or_else(|| SafetensorError::new_err("Missing 'enc_key' in config"))?;
+    let enc_key_dict = enc_key_any.downcast::<PyDict>()?;
+    let enc_key = pykeymaterial_from_dict(&enc_key_dict)?;
+
+    // sign_key: dict
+    let sign_key_any = config_dict.get_item("sign_key")?
+        .ok_or_else(|| SafetensorError::new_err("Missing 'sign_key' in config"))?;
+    let sign_key_dict = sign_key_any.downcast::<PyDict>()?;
+    let sign_key = pykeymaterial_from_dict(&sign_key_dict)?;
+
+    // policy: dict (optional)
+    let policy = match config_dict.get_item("policy")? {
+        Some(val) => {
+            let policy_dict = val.downcast::<PyDict>()?;
+            let local = match policy_dict.get_item("local")? {
+                Some(v) => Some(v.extract::<String>()?),
+                None => None,
+            };
+            let remote = match policy_dict.get_item("remote")? {
+                Some(v) => Some(v.extract::<String>()?),
+                None => None,
+            };
+            LoadPolicy::new(local, remote)
+        },
+        None => LoadPolicy::new(None, None),
+    };
+
+    let config = SerializeCryptoConfig::new(tensors, enc_key, sign_key, policy)
+        .map_err(|e| SafetensorError::new_err(format!("Failed to build SerializeCryptoConfig: {e}")))?;
+    Ok(Some(config))
+}
+
+fn pykeymaterial_from_dict(dict: &PyBound<PyDict>) -> PyResult<KeyMaterial> {
+    let key_type = match dict.get_item("kty")? {
+        Some(v) => v.extract::<String>()?,
+        None => match dict.get_item("key_type")? {
+            Some(v) => v.extract::<String>()?,
+            None => return Err(SafetensorError::new_err("Missing 'kty' or 'key_type' in key dict")),
+        },
+    };
+    let alg = dict.get_item("alg")?
+        .ok_or_else(|| SafetensorError::new_err("Missing 'alg' in key dict"))?
+        .extract::<String>()?;
+    let use_ = match dict.get_item("use")? {
+        Some(v) => Some(v.extract::<String>()?),
+        None => None,
+    };
+    let key_ops = match dict.get_item("key_ops")? {
+        Some(v) => Some(v.extract::<Vec<String>>()?),
+        None => None,
+    };
+    let kid = match dict.get_item("kid")? {
+        Some(v) => Some(v.extract::<String>()?),
+        None => None,
+    };
+    let jku = match dict.get_item("jku")? {
+        Some(v) => Some(v.extract::<String>()?),
+        None => None,
+    };
+    let k = match dict.get_item("k")? {
+        Some(v) => Some(v.extract::<Vec<u8>>()?),
+        None => None,
+    };
+    let x_pub = match dict.get_item("x")? {
+        Some(v) => Some(v.extract::<Vec<u8>>()?),
+        None => None,
+    };
+    let d_priv = match dict.get_item("d")? {
+        Some(v) => Some(v.extract::<Vec<u8>>()?),
+        None => None,
+    };
+    KeyMaterial::new(key_type, alg, use_, key_ops, kid, jku, k, x_pub, d_priv)
+        .map_err(|e| SafetensorError::new_err(format!("Failed to build KeyMaterial: {e}")))
+}
+
+/// Serializes raw data as CryptoTensor.
+#[pyfunction]
+#[pyo3(signature = (tensor_dict, metadata=None, config=None))]
+fn serialize_crypto<'b>(
+    py: Python<'b>,
+    tensor_dict: HashMap<String, PyBound<PyDict>>,
+    metadata: Option<HashMap<String, String>>,
+    config: Option<PyBound<PyAny>>,
+) -> PyResult<PyBound<'b, PyBytes>> {
+    let config = prepare_crypto(config)?;
+    let tensors = prepare(tensor_dict)?;
+    let out = safetensors::tensor::serialize(&tensors, &metadata, config.as_ref())
+        .map_err(|e| SafetensorError::new_err(format!("Encryption serialize failed: {e}")))?;
+    let pybytes = PyBytes::new(py, &out);
+    Ok(pybytes)
+}
+
+/// Serializes raw data as CryptoTensor and writes to file.
+#[pyfunction]
+#[pyo3(signature = (tensor_dict, filename, metadata=None, config=None))]
+fn serialize_file_crypto(
+    tensor_dict: HashMap<String, PyBound<PyDict>>,
+    filename: PathBuf,
+    metadata: Option<HashMap<String, String>>,
+    config: Option<PyBound<PyAny>>,
+) -> PyResult<()> {
+    let config = prepare_crypto(config)?;
+    let tensors = prepare(tensor_dict)?;
+    safetensors::tensor::serialize_to_file(&tensors, &metadata, filename.as_path(), config.as_ref())
+        .map_err(|e| SafetensorError::new_err(format!("Encryption serialize to file failed: {e}")))?;
     Ok(())
 }
 
@@ -169,6 +293,7 @@ fn deserialize(py: Python, bytes: &[u8]) -> PyResult<Vec<(String, HashMap<String
         .map_err(|e| SafetensorError::new_err(format!("Error while deserializing: {e:?}")))?;
 
     let tensors = safetensor.tensors();
+    let tensors = tensors.map_err(|e| SafetensorError::new_err(format!("Error while deserializing: {e:?}")))?;
     let mut items = Vec::with_capacity(tensors.len());
 
     for (tensor_name, tensor) in tensors {
@@ -392,6 +517,7 @@ struct Open {
     framework: Framework,
     device: Device,
     storage: Arc<Storage>,
+    crypto: Option<CryptoTensor<'static>>,
 }
 
 impl Open {
@@ -416,6 +542,11 @@ impl Open {
         })?;
 
         let offset = n + 8;
+
+        // Always call CryptoTensor::from_header to detect encryption
+        // If the file is encrypted, this returns Some(CryptoTensor), otherwise None
+        let crypto = safetensors::crypto::CryptoTensor::from_header(&metadata)
+            .map_err(|e| SafetensorError::new_err(format!("Error parsing CryptoTensor: {e:?}")))?;
 
         Python::with_gil(|py| -> PyResult<()> {
             match framework {
@@ -490,6 +621,7 @@ impl Open {
             framework,
             device,
             storage,
+            crypto,
         })
     }
 
@@ -551,12 +683,14 @@ impl Open {
 
         match &self.storage.as_ref() {
             Storage::Mmap(mmap) => {
-                let data =
-                    &mmap[info.data_offsets.0 + self.offset..info.data_offsets.1 + self.offset];
-
-                let array: PyObject =
-                    Python::with_gil(|py| PyByteArray::new(py, data).into_any().into());
-
+                let data = &mmap[info.data_offsets.0 + self.offset..info.data_offsets.1 + self.offset];
+                let data = if let Some(crypto) = &self.crypto {
+                    crypto.silent_decrypt(name, data)
+                        .map_err(|e| SafetensorError::new_err(format!("Decryption failed: {e:?}")))?
+                } else {
+                    data
+                };
+                let array: PyObject = Python::with_gil(|py| PyByteArray::new(py, data).into_any().into());
                 create_tensor(
                     &self.framework,
                     info.dtype,
@@ -587,16 +721,25 @@ impl Open {
                         .get()
                         .ok_or_else(|| SafetensorError::new_err("Could not find storage"))?;
                     let storage: &PyBound<PyAny> = storage.bind(py);
-                    let storage_slice = storage
+                    let storage_slice: PyBound<PyAny> = storage
                         .getattr(intern!(py, "__getitem__"))?
                         .call1((slice,))?;
+
+                    let array: PyObject = if let Some(crypto) = &self.crypto {
+                        let py_bytes: PyBound<PyBytes> = storage_slice.extract()?;
+                        let decrypted = crypto.silent_decrypt(name, py_bytes.as_bytes())
+                            .map_err(|e| SafetensorError::new_err(format!("Decryption failed: {e:?}")))?;
+                        PyByteArray::new(py, &decrypted).into_any().into()
+                    } else {
+                        storage_slice.into()
+                    };
 
                     let sys = PyModule::import(py, intern!(py, "sys"))?;
                     let byteorder: String = sys.getattr(intern!(py, "byteorder"))?.extract()?;
 
                     let mut tensor = torch
                         .getattr(intern!(py, "asarray"))?
-                        .call((storage_slice,), Some(&kwargs))?
+                        .call((array,), Some(&kwargs))?
                         .getattr(intern!(py, "view"))?
                         .call((), Some(&view_kwargs))?;
 
@@ -666,6 +809,7 @@ impl Open {
                 offset: self.offset,
                 device: self.device.clone(),
                 storage: self.storage.clone(),
+                tensor_crypto: self.crypto.as_ref().and_then(|c| c.get(name).cloned()),
             })
         } else {
             Err(SafetensorError::new_err(format!(
@@ -800,6 +944,7 @@ struct PySafeSlice {
     offset: usize,
     device: Device,
     storage: Arc<Storage>,
+    tensor_crypto: Option<TensorCryptor<'static>>,
 }
 
 #[derive(FromPyObject)]
@@ -899,6 +1044,13 @@ impl PySafeSlice {
                 };
                 let data = &mmap[self.info.data_offsets.0 + self.offset
                     ..self.info.data_offsets.1 + self.offset];
+                // If the tensor is encrypted, decrypt it
+                let data = if let Some(crypto) = &self.tensor_crypto {
+                    crypto.decrypt(data)
+                        .map_err(|e| SafetensorError::new_err(format!("Decryption failed: {e:?}")))?
+                } else {
+                    data
+                };
 
                 let shape = self.info.shape.clone();
 
@@ -968,13 +1120,22 @@ impl PySafeSlice {
                     .call1((slice,))?;
 
                 let slices = slices.into_pyobject(py)?;
+                // If the tensor is encrypted, decrypt it
+                let array: PyObject = if let Some(crypto) = &self.tensor_crypto {
+                    let py_bytes: PyBound<PyBytes> = storage_slice.extract()?;
+                    let decrypted = crypto.decrypt(py_bytes.as_bytes())
+                        .map_err(|e| SafetensorError::new_err(format!("Decryption failed: {e:?}")))?;
+                    PyByteArray::new(py, &decrypted).into_any().into()
+                } else {
+                    storage_slice.into()
+                };
 
                 let sys = PyModule::import(py, intern!(py, "sys"))?;
                 let byteorder: String = sys.getattr(intern!(py, "byteorder"))?.extract()?;
 
                 let mut tensor = torch
                     .getattr(intern!(py, "asarray"))?
-                    .call((storage_slice,), Some(&kwargs))?
+                    .call((array,), Some(&kwargs))?
                     .getattr(intern!(py, "view"))?
                     .call((), Some(&view_kwargs))?;
                 if byteorder == "big" {
@@ -1218,6 +1379,8 @@ pyo3::create_exception!(
 fn _safetensors_rust(m: &PyBound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(serialize, m)?)?;
     m.add_function(wrap_pyfunction!(serialize_file, m)?)?;
+    m.add_function(wrap_pyfunction!(serialize_crypto, m)?)?;
+    m.add_function(wrap_pyfunction!(serialize_file_crypto, m)?)?;
     m.add_function(wrap_pyfunction!(deserialize, m)?)?;
     m.add_class::<safe_open>()?;
     m.add("SafetensorError", m.py().get_type::<SafetensorError>())?;
