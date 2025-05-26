@@ -554,7 +554,7 @@ def _flatten(tensors: Dict[str, torch.Tensor]) -> Dict[str, Dict[str, Any]]:
     }
 
 
-def save_crypto(
+def save_encrypted(
     tensors: Dict[str, torch.Tensor],
     metadata: Optional[Dict[str, str]] = None,
     config: Optional[dict] = None
@@ -574,23 +574,23 @@ def save_crypto(
         bytes: The encrypted safetensors format raw bytes.
 
     Example:
-        >>> from safetensors.torch import save_crypto
+        >>> from safetensors.torch import save_encrypted
         >>> import torch
         >>> tensors = {"embedding": torch.zeros((512, 1024)), "attention": torch.zeros((256, 256))}
         >>> config = {"enc_key": {...}, "sign_key": {...}}
-        >>> byte_data = save_crypto(tensors, config=config)
+        >>> byte_data = save_encrypted(tensors, config=config)
     """
-    from safetensors import serialize_crypto
+    from safetensors import serialize_encrypted
     flattened = _flatten(tensors)
     try:
-        serialized = serialize_crypto(flattened, metadata=metadata, config=config)
+        serialized = serialize_encrypted(flattened, metadata=metadata, config=config)
         result = bytes(serialized)
         return result
     except Exception as e:
         raise RuntimeError(f"Failed to encrypt and serialize tensors: {e}")
 
 
-def save_file_crypto(
+def save_file_encrypted(
     tensors: Dict[str, torch.Tensor],
     filename: Union[str, os.PathLike],
     metadata: Optional[Dict[str, str]] = None,
@@ -613,15 +613,15 @@ def save_file_crypto(
         None
 
     Example:
-        >>> from safetensors.torch import save_file_crypto
+        >>> from safetensors.torch import save_file_encrypted
         >>> import torch
         >>> tensors = {"embedding": torch.zeros((512, 1024)), "attention": torch.zeros((256, 256))}
         >>> config = {"enc_key": {...}, "sign_key": {...}}
-        >>> save_file_crypto(tensors, "model.safetensors", config=config)
+        >>> save_file_encrypted(tensors, "model.safetensors", config=config)
     """
-    from safetensors import serialize_file_crypto
+    from safetensors import serialize_file_encrypted
     flattened = _flatten(tensors)
     try:
-        serialize_file_crypto(flattened, filename, metadata=metadata, config=config)
+        serialize_file_encrypted(flattened, filename, metadata=metadata, config=config)
     except Exception as e:
         raise RuntimeError(f"Failed to encrypt and save tensors to file: {e}")

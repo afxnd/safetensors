@@ -246,7 +246,7 @@ fn pykeymaterial_from_dict(dict: &PyBound<PyDict>) -> PyResult<KeyMaterial> {
 /// Serializes raw data as CryptoTensor.
 #[pyfunction]
 #[pyo3(signature = (tensor_dict, metadata=None, config=None))]
-fn serialize_crypto<'b>(
+fn serialize_encrypted<'b>(
     py: Python<'b>,
     tensor_dict: HashMap<String, PyBound<PyDict>>,
     metadata: Option<HashMap<String, String>>,
@@ -263,7 +263,7 @@ fn serialize_crypto<'b>(
 /// Serializes raw data as CryptoTensor and writes to file.
 #[pyfunction]
 #[pyo3(signature = (tensor_dict, filename, metadata=None, config=None))]
-fn serialize_file_crypto(
+fn serialize_file_encrypted(
     tensor_dict: HashMap<String, PyBound<PyDict>>,
     filename: PathBuf,
     metadata: Option<HashMap<String, String>>,
@@ -1379,8 +1379,8 @@ pyo3::create_exception!(
 fn _safetensors_rust(m: &PyBound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(serialize, m)?)?;
     m.add_function(wrap_pyfunction!(serialize_file, m)?)?;
-    m.add_function(wrap_pyfunction!(serialize_crypto, m)?)?;
-    m.add_function(wrap_pyfunction!(serialize_file_crypto, m)?)?;
+    m.add_function(wrap_pyfunction!(serialize_encrypted, m)?)?;
+    m.add_function(wrap_pyfunction!(serialize_file_encrypted, m)?)?;
     m.add_function(wrap_pyfunction!(deserialize, m)?)?;
     m.add_class::<safe_open>()?;
     m.add("SafetensorError", m.py().get_type::<SafetensorError>())?;

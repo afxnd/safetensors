@@ -53,7 +53,7 @@ def serialize_file(tensor_dict, filename, metadata=None):
     """
     pass
 
-def serialize_crypto(tensor_dict: dict, metadata: dict = ..., config: dict = ...) -> bytes:
+def serialize_encrypted(tensor_dict: dict, metadata: dict = ..., config: dict = ...) -> bytes:
     """
     Serializes raw data as encrypted CryptoTensor.
 
@@ -70,7 +70,7 @@ def serialize_crypto(tensor_dict: dict, metadata: dict = ..., config: dict = ...
     """
     ...
 
-def serialize_file_crypto(tensor_dict: dict, filename, metadata: dict = ..., config: dict = ...) -> None:
+def serialize_file_encrypted(tensor_dict: dict, filename, metadata: dict = ..., config: dict = ...) -> None:
     """
     Serializes raw data as encrypted CryptoTensor and writes to file.
 

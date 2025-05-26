@@ -137,7 +137,7 @@ def _tf2np(tf_dict: Dict[str, tf.Tensor]) -> Dict[str, np.array]:
     return tf_dict
 
 
-def save_crypto(
+def save_encrypted(
     tensors: Dict[str, tf.Tensor],
     metadata: Optional[Dict[str, str]] = None,
     config: Optional[dict] = None
@@ -157,18 +157,18 @@ def save_crypto(
         bytes: The encrypted safetensors format raw bytes.
 
     Example:
-        >>> from safetensors.tensorflow import save_crypto
+        >>> from safetensors.tensorflow import save_encrypted
         >>> import tensorflow as tf
         >>> tensors = {"embedding": tf.zeros((512, 1024)), "attention": tf.zeros((256, 256))}
         >>> config = {"enc_key": {...}, "sign_key": {...}}
-        >>> byte_data = save_crypto(tensors, config=config)
+        >>> byte_data = save_encrypted(tensors, config=config)
     """
     np_tensors = _tf2np(tensors)
     from safetensors import numpy as st_numpy
-    return st_numpy.save_crypto(np_tensors, metadata=metadata, config=config)
+    return st_numpy.save_encrypted(np_tensors, metadata=metadata, config=config)
 
 
-def save_file_crypto(
+def save_file_encrypted(
     tensors: Dict[str, tf.Tensor],
     filename: Union[str, os.PathLike],
     metadata: Optional[Dict[str, str]] = None,
@@ -191,12 +191,12 @@ def save_file_crypto(
         None
 
     Example:
-        >>> from safetensors.tensorflow import save_file_crypto
+        >>> from safetensors.tensorflow import save_file_encrypted
         >>> import tensorflow as tf
         >>> tensors = {"embedding": tf.zeros((512, 1024)), "attention": tf.zeros((256, 256))}
         >>> config = {"enc_key": {...}, "sign_key": {...}}
-        >>> save_file_crypto(tensors, "model.safetensors", config=config)
+        >>> save_file_encrypted(tensors, "model.safetensors", config=config)
     """
     np_tensors = _tf2np(tensors)
     from safetensors import numpy as st_numpy
-    return st_numpy.save_file_crypto(np_tensors, filename, metadata=metadata, config=config)
+    return st_numpy.save_file_encrypted(np_tensors, filename, metadata=metadata, config=config)
