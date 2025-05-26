@@ -94,6 +94,10 @@ pub enum CryptoTensorError {
     MultipleKeysWithoutKid,
     /// Policy相关错误
     Policy(String),
+    /// Unsupported version
+    VersionUnsupported(String),
+    /// Missing version field
+    VersionMissing,
 }
 
 impl fmt::Display for CryptoTensorError {
@@ -193,6 +197,12 @@ impl fmt::Display for CryptoTensorError {
             }
             CryptoTensorError::Policy(msg) => {
                 write!(f, "Policy error: {}", msg)
+            }
+            CryptoTensorError::VersionUnsupported(version) => {
+                write!(f, "Version {} is unsupported", version)
+            }
+            CryptoTensorError::VersionMissing => {
+                write!(f, "Version is missing")
             }
         }
     }
@@ -659,6 +669,8 @@ impl KeyMaterial {
 
 /// Configuration for serializing tensors with encryption
 pub struct SerializeCryptoConfig {
+    /// CryptoTensor version
+    version: String,
     /// The names of the tensors to encrypt
     tensors: Option<Vec<String>>,
     /// The key material for encryption
@@ -672,14 +684,24 @@ pub struct SerializeCryptoConfig {
 impl SerializeCryptoConfig {
     /// Create a new configuration for serializing tensors with encryption
     pub fn new(
+        version: String,
         tensors: Option<Vec<String>>,
         enc_key: KeyMaterial,
         sign_key: KeyMaterial,
         policy: LoadPolicy,
     ) -> Result<Self, CryptoTensorError> {
+        if version != "1" {
+            return Err(CryptoTensorError::VersionUnsupported(version));
+        }
         enc_key.validate(ValidateMode::Save)?;
         sign_key.validate(ValidateMode::Save)?;
-        Ok(Self { tensors, enc_key, sign_key, policy })
+        Ok(Self {
+            tensors,
+            enc_key,
+            sign_key,
+            policy,
+            version,
+        })
     }
 }
 
@@ -1357,6 +1379,8 @@ pub struct CryptoTensor<'data> {
     sign_key: KeyMaterial,
     /// Policy for model loading and KMS validation
     policy: LoadPolicy,
+    /// CryptoTensor version
+    version: String,
 }
 
 impl<'data> CryptoTensor<'data> {
@@ -1386,7 +1410,10 @@ impl<'data> CryptoTensor<'data> {
         tensors: Vec<String>,
         config: &SerializeCryptoConfig,
     ) -> Result<Option<Self>, CryptoTensorError> {
-        // Validate the key material
+        // Check version
+        if config.version != "1" {
+            return Err(CryptoTensorError::VersionUnsupported(config.version.clone()));
+        }
         config.enc_key.validate(ValidateMode::Save)?;
         config.sign_key.validate(ValidateMode::Save)?;
 
@@ -1423,6 +1450,7 @@ impl<'data> CryptoTensor<'data> {
             sign_key: config.sign_key.clone(),
             signer,
             policy: config.policy.clone(),
+            version: config.version.clone(),
         }))
     }
 
@@ -1452,6 +1480,7 @@ impl<'data> CryptoTensor<'data> {
 
         // Add key material information
         let key_material = serde_json::json!({
+            "version": self.version,
             "enc": self.enc_key,
             "sign": self.sign_key
         });
@@ -1514,6 +1543,12 @@ impl<'data> CryptoTensor<'data> {
         // Parse key materials
         let key_materials: serde_json::Value = serde_json::from_str(key_materials)
             .map_err(|e| CryptoTensorError::InvalidKey(format!("Failed to parse key materials: {}", e)))?;
+        let version = key_materials.get("version")
+            .and_then(|v| v.as_str())
+            .ok_or(CryptoTensorError::VersionMissing)?;
+        if version != "1" {
+            return Err(CryptoTensorError::VersionUnsupported(version.to_string()));
+        }
         let enc_key: KeyMaterial = serde_json::from_value(key_materials["enc"].clone())
             .map_err(|e| CryptoTensorError::InvalidKey(format!("Failed to parse encryption key: {}", e)))?;
         let sign_key: KeyMaterial = serde_json::from_value(key_materials["sign"].clone())
@@ -1569,6 +1604,7 @@ impl<'data> CryptoTensor<'data> {
             enc_key,
             sign_key,
             policy,
+            version: version.to_string(),
         }))
     }
 
@@ -2652,6 +2688,7 @@ mod tests {
         // Create serialization configuration
         let dummy_policy = LoadPolicy::new(None, None);
         let config = SerializeCryptoConfig::new(
+            "1".to_string(),
             Some(vec!["tensor1".to_string()]),
             enc_key,
             sign_key,

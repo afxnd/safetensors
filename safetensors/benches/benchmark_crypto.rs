@@ -137,6 +137,7 @@ fn bench_encryption_performance(c: &mut Criterion) {
 
             let dummy_policy = LoadPolicy::new(None, None);
             let crypto_config = SerializeCryptoConfig::new(
+                "1".to_string(),
                 Some(tensors_to_encrypt),
                 enc_key,
                 sign_key,
@@ -222,6 +223,7 @@ fn bench_decryption_performance(c: &mut Criterion) {
 
         let dummy_policy = LoadPolicy::new(None, None);
         let crypto_config = SerializeCryptoConfig::new(
+            "1".to_string(),
             None,
             enc_key,
             sign_key,

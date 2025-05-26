@@ -195,7 +195,7 @@ fn prepare_crypto(config: Option<PyBound<PyAny>>) -> PyResult<Option<SerializeCr
         None => LoadPolicy::new(None, None),
     };
 
-    let config = SerializeCryptoConfig::new(tensors, enc_key, sign_key, policy)
+    let config = SerializeCryptoConfig::new("1".to_string(), tensors, enc_key, sign_key, policy)
         .map_err(|e| SafetensorError::new_err(format!("Failed to build SerializeCryptoConfig: {e}")))?;
     Ok(Some(config))
 }

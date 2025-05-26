@@ -1453,6 +1453,7 @@ mod tests {
         // Create serialization config
         let dummy_policy = LoadPolicy::new(None, None);
         let serialize_config = SerializeCryptoConfig::new(
+            "1".to_string(),
             Some(vec!["attn.0".to_string()]),
             enc_key,
             sign_key,
@@ -1570,6 +1571,7 @@ mod tests {
         // Create serialization config
         let dummy_policy = LoadPolicy::new(None, None);
         let serialize_config = SerializeCryptoConfig::new(
+            "1".to_string(),
             Some(vec!["tensor1".to_string()]),
             enc_key,
             sign_key,
@@ -1684,6 +1686,7 @@ mod tests {
         // Create serialization config
         let dummy_policy = LoadPolicy::new(None, None);
         let serialize_config = SerializeCryptoConfig::new(
+            "1".to_string(),
             Some(vec!["test_tensor".to_string()]),
             enc_key,
             sign_key,
@@ -1754,6 +1757,7 @@ mod tests {
         // Create serialization config
         let dummy_policy = LoadPolicy::new(None, None);
         let serialize_config = SerializeCryptoConfig::new(
+            "1".to_string(),
             Some(vec!["tensor1".to_string()]),
             enc_key,
             sign_key,
