@@ -1,7 +1,7 @@
 use crate::tensor::{Metadata, TensorInfo};
 use hex;
 use once_cell::sync::OnceCell;
-use ring::signature::{self, Ed25519KeyPair, UnparsedPublicKey};
+use ring::signature::{self, Ed25519KeyPair, UnparsedPublicKey, KeyPair};
 use ring::{aead, rand::{self, SecureRandom}};
 use serde::{Deserialize, Serialize, de::Error, Deserializer};
 use std::collections::HashMap;
@@ -278,25 +278,6 @@ enum JwkKeyType {
     Okp,
 }
 
-impl JwkKeyType {
-    /// Convert a string representation to a key type
-    fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "oct" => Some(JwkKeyType::Oct),
-            "okp" => Some(JwkKeyType::Okp),
-            _ => None,
-        }
-    }
-}
-
-/// JSON Web Key (JWK) use
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum JwkKeyUse {
-    Sig,
-    Enc,
-}
-
 /// Serialize and deserialize OnceCell<Option<String>>
 mod once_cell_option {
     use super::*;
@@ -349,8 +330,8 @@ pub struct KeyMaterial {
 
 impl KeyMaterial {
     /// Create a new KeyMaterial
-    pub fn new(
-        key_type: String,
+    fn new_internal(
+        key_type: JwkKeyType,
         alg: String,
         kid: Option<String>,
         jku: Option<String>,
@@ -359,11 +340,10 @@ impl KeyMaterial {
         d_priv: Option<Vec<u8>>,
     ) -> Result<Self, CryptoTensorError> {
         let key_material = Self {
-            key_type: JwkKeyType::from_str(&key_type)
-                .ok_or_else(|| CryptoTensorError::InvalidKey(format!("Invalid key type: {}", key_type)))?,
+            key_type,
             alg,
             kid,
-            k: OnceCell::new(),
+            k: OnceCell::new(), 
             x_pub: OnceCell::new(),
             d_priv: OnceCell::new(),
             jku,
@@ -592,8 +572,175 @@ impl KeyMaterial {
             _ => Ok(Some(matching_keys[0]))
         }
     }
-}
 
+    /// Create a new symmetric encryption key (kty=oct)
+    ///
+    /// # Arguments
+    /// * `alg` - Optional algorithm name (default: "aes256gcm")
+    /// * `kid` - Optional key ID
+    /// * `jku` - Optional JWK URL
+    /// * `key_hex` - Optional hex-encoded key string
+    ///
+    /// # Returns
+    /// * `Ok(KeyMaterial)` - The generated key material
+    /// * `Err(CryptoTensorError)` - If input is invalid
+    pub fn new_enc_key(
+        key_hex: Option<String>,
+        alg: Option<String>,
+        kid: Option<String>,
+        jku: Option<String>,
+    ) -> Result<Self, CryptoTensorError> {
+        let alg = alg.unwrap_or_else(|| "aes256gcm".to_string());
+        let enc_alg = EncryptionAlgorithm::from_str(&alg)
+            .ok_or_else(|| CryptoTensorError::InvalidAlgorithm(alg.clone()))?;
+        let key_bytes = if let Some(ref hex_str) = key_hex {
+            let bytes = hex::decode(hex_str)
+                .map_err(|e| CryptoTensorError::KeyCreation(format!("Failed to decode hex key: {}", e)))?;
+            if bytes.len() != enc_alg.key_len() {
+                return Err(CryptoTensorError::InvalidKeyLength {
+                    expected: enc_alg.key_len(),
+                    got: bytes.len(),
+                });
+            }
+            bytes
+        } else {
+            // Generate random key
+            let mut key = vec![0u8; enc_alg.key_len()];
+            let rng = rand::SystemRandom::new();
+            rng.fill(&mut key)
+                .map_err(|e| CryptoTensorError::RandomGeneration(e.to_string()))?;
+            key
+        };
+        KeyMaterial::new_internal(
+            JwkKeyType::Oct,
+            alg,
+            kid,
+            jku,
+            Some(key_bytes),
+            None,
+            None,
+        )
+    }
+
+    /// Create a new signing key (kty=okp)
+    ///
+    /// # Arguments
+    /// * `alg` - Optional algorithm name (default: "ed25519")
+    /// * `kid` - Optional key ID
+    /// * `jku` - Optional JWK URL
+    /// * `public_hex` - Optional hex-encoded public key string
+    /// * `private_hex` - Optional hex-encoded private key string
+    ///
+    /// # Returns
+    /// * `Ok(KeyMaterial)` - The generated key material
+    /// * `Err(CryptoTensorError)` - If input is invalid
+    pub fn new_sign_key(
+        public_hex: Option<String>,
+        private_hex: Option<String>,
+        alg: Option<String>,
+        kid: Option<String>,
+        jku: Option<String>,
+    ) -> Result<Self, CryptoTensorError> {
+        let alg = alg.unwrap_or_else(|| "ed25519".to_string());
+        let sig_alg = SignatureAlgorithm::from_str(&alg)
+            .ok_or_else(|| CryptoTensorError::InvalidAlgorithm(alg.clone()))?;
+        match sig_alg {
+            SignatureAlgorithm::Ed25519 => {
+                let public = if let Some(pub_hex) = public_hex {
+                    let pub_bytes = hex::decode(&pub_hex)
+                        .map_err(|e| CryptoTensorError::KeyCreation(format!("Failed to decode hex public key: {}", e)))?;
+                    if pub_bytes.len() != 32 {
+                        return Err(CryptoTensorError::InvalidKeyLength {
+                            expected: 32,
+                            got: pub_bytes.len(),
+                        });
+                    }
+                    Some(pub_bytes)
+                } else { None };
+                let private = if let Some(priv_hex) = private_hex {
+                    let priv_bytes = hex::decode(&priv_hex)
+                        .map_err(|e| CryptoTensorError::KeyCreation(format!("Failed to decode hex private key: {}", e)))?;
+                    // Try to parse as PKCS8
+                    let _ = Ed25519KeyPair::from_pkcs8(&priv_bytes)
+                        .map_err(|e| CryptoTensorError::KeyCreation(format!("Invalid Ed25519 PKCS8 private key: {}", e)))?;
+                    Some(priv_bytes)
+                } else { None };
+                // If both are None, generate new key pair
+                let (public, private) = if public.is_none() && private.is_none() {
+                    let rng = rand::SystemRandom::new();
+                    let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng)
+                        .map_err(|e| CryptoTensorError::KeyCreation(e.to_string()))?;
+                    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref())
+                        .map_err(|e| CryptoTensorError::KeyCreation(e.to_string()))?;
+                    (Some(key_pair.public_key().as_ref().to_vec()), Some(pkcs8_bytes.as_ref().to_vec()))
+                } else {
+                    (public, private)
+                };
+                KeyMaterial::new_internal(
+                    JwkKeyType::Okp,
+                    alg,
+                    kid,
+                    jku,
+                    None,
+                    public,
+                    private,
+                )
+            }
+        }
+    }
+
+    /// Convert this KeyMaterial to a JWK JSON string
+    ///
+    /// # Returns
+    /// * `Ok(String)` - JWK JSON string
+    /// * `Err(CryptoTensorError)` - If serialization fails
+    pub fn to_jwk(&self) -> Result<String, CryptoTensorError> {
+        // Only include JWK-relevant fields
+        #[derive(Serialize)]
+        struct JwkOut<'a> {
+            #[serde(rename = "kty")]
+            key_type: &'a JwkKeyType,
+            alg: &'a String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            kid: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            jku: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            k: Option<&'a String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            #[serde(rename = "x")]
+            x_pub: Option<&'a String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            #[serde(rename = "d")]
+            d_priv: Option<&'a String>,
+        }
+        let jwk = JwkOut {
+            key_type: &self.key_type,
+            alg: &self.alg,
+            kid: &self.kid,
+            jku: &self.jku,
+            k: self.k.get().and_then(|v| v.as_ref()),
+            x_pub: self.x_pub.get().and_then(|v| v.as_ref()),
+            d_priv: self.d_priv.get().and_then(|v| v.as_ref()),
+        };
+        serde_json::to_string(&jwk).map_err(|e| CryptoTensorError::KeyCreation(format!("Failed to serialize JWK: {}", e)))
+    }
+
+    /// Parse KeyMaterial from a serde_json::Value (header)
+    ///
+    /// # Arguments
+    /// * `header` - serde_json::Value containing key material
+    ///
+    /// # Returns
+    /// * `Ok<KeyMaterial>` - Key material
+    /// * `Err(CryptoTensorError)` - If parsing or validation fails
+    fn from_header(header: &serde_json::Value) -> Result<Self, CryptoTensorError> {
+        let key: KeyMaterial = serde_json::from_value(header.clone())
+            .map_err(|e| CryptoTensorError::InvalidKey(format!("Failed to parse key material: {}", e)))?;
+        key.validate(ValidateMode::Load)?;
+        Ok(key)
+    }
+}
 
 /// Configuration for serializing tensors with encryption
 pub struct SerializeCryptoConfig {
@@ -1477,12 +1624,9 @@ impl<'data> CryptoTensor<'data> {
         if version != "1" {
             return Err(CryptoTensorError::VersionUnsupported(version.to_string()));
         }
-        let enc_key: KeyMaterial = serde_json::from_value(key_materials["enc"].clone())
-            .map_err(|e| CryptoTensorError::InvalidKey(format!("Failed to parse encryption key: {}", e)))?;
-        let sign_key: KeyMaterial = serde_json::from_value(key_materials["sign"].clone())
-            .map_err(|e| CryptoTensorError::InvalidKey(format!("Failed to parse signing key: {}", e)))?;
-        enc_key.validate(ValidateMode::Load)?;
-        sign_key.validate(ValidateMode::Load)?;
+        let enc_key = KeyMaterial::from_header(&key_materials["enc"])?;
+        let sign_key = KeyMaterial::from_header(&key_materials["sign"])?;
+
 
         // Load keys
         sign_key.load_key()?;
@@ -1623,12 +1767,9 @@ mod tests {
     #[test]
     fn test_tensor_cryptor_empty_data() -> Result<(), CryptoTensorError> {
         let master_key = vec![1u8; 32];
-        let key_material = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            None,
-            None,
-            Some(master_key),
+        let key_material = KeyMaterial::new_enc_key(
+            Some(hex::encode(master_key)),
+            Some("aes256gcm".to_string()),
             None,
             None,
         )?;
@@ -1654,12 +1795,9 @@ mod tests {
     #[test]
     fn test_tensor_cryptor_non_empty_data() -> Result<(), CryptoTensorError> {
         let master_key = vec![1u8; 32];
-        let key_material = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            None,
-            None,
-            Some(master_key),
+        let key_material = KeyMaterial::new_enc_key(
+            Some(hex::encode(master_key)),
+            Some("aes256gcm".to_string()),
             None,
             None,
         )?;
@@ -1685,12 +1823,9 @@ mod tests {
     #[test]
     fn test_tensor_cryptor_large_data() -> Result<(), CryptoTensorError> {
         let master_key = vec![1u8; 32];
-        let key_material = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            None,
-            None,
-            Some(master_key),
+        let key_material = KeyMaterial::new_enc_key(
+            Some(hex::encode(master_key)),
+            Some("aes256gcm".to_string()),
             None,
             None,
         )?;
@@ -1724,12 +1859,9 @@ mod tests {
 
         for (key_algo, key_len) in algorithms.iter() {
             let master_key = vec![1u8; *key_len];
-            let key_material = KeyMaterial::new(
-                "oct".to_string(),
-                key_algo.to_string(),
-                None,
-                None,
-                Some(master_key),
+            let key_material = KeyMaterial::new_enc_key(
+                Some(hex::encode(master_key)),
+                Some(key_algo.to_string()),
                 None,
                 None,
             )?;
@@ -1763,14 +1895,12 @@ mod tests {
         let public_key = key_pair.public_key().as_ref().to_vec();
 
         // Create key material
-        let key_material = KeyMaterial::new(
-            "okp".to_string(),
-            "ed25519".to_string(),
+        let key_material = KeyMaterial::new_sign_key(
+            Some(hex::encode(public_key)),
+            Some(hex::encode(pkcs8_bytes.as_ref().to_vec())),
+            Some("ed25519".to_string()),
             None,
             None,
-            None,
-            Some(public_key),
-            Some(pkcs8_bytes.as_ref().to_vec()),
         )?;
 
         // Create HeaderSigner for signing
@@ -1805,15 +1935,21 @@ mod tests {
     /// Test header signer error handling
     #[test]
     fn test_header_signer_error_handling() -> Result<(), CryptoTensorError> {
+        // Generate Ed25519 key pair
+        let rng = SystemRandom::new();
+        let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng)
+            .map_err(|e| CryptoTensorError::KeyCreation(e.to_string()))?;
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref())
+            .map_err(|e| CryptoTensorError::KeyCreation(e.to_string()))?;
+        let public_key = key_pair.public_key().as_ref().to_vec();
+
         // Test missing private key
-        let key_material = KeyMaterial::new(
-            "okp".to_string(),
-            "ed25519".to_string(),
-            None,
-            None,
-            None,
-            Some(vec![0u8; 32]), // Invalid public key
+        let key_material = KeyMaterial::new_sign_key(
+            Some(hex::encode(public_key)),
             None, // No private key
+            Some("ed25519".to_string()),
+            None,
+            None,
         )?;
 
         let signer = HeaderSigner::new(&key_material)?;
@@ -1826,14 +1962,12 @@ mod tests {
         ));
 
         // Test missing public key
-        let key_material = KeyMaterial::new(
-            "okp".to_string(),
-            "ed25519".to_string(),
+        let key_material = KeyMaterial::new_sign_key(
+            None,
+            Some(hex::encode(pkcs8_bytes.as_ref().to_vec())),
+            Some("ed25519".to_string()),
             None,
             None,
-            None,
-            None, // No public key
-            Some(vec![0u8; 32]), // Invalid private key
         )?;
 
         let signer = HeaderSigner::new(&key_material)?;
@@ -1845,19 +1979,14 @@ mod tests {
         ));
 
         // Test invalid signature algorithm
-        let key_material = KeyMaterial::new(
-            "okp".to_string(),
-            "invalid_algorithm".to_string(), // Invalid algorithm
-            None,
-            None,
-            None,
-            Some(vec![0u8; 32]),
-            Some(vec![0u8; 32]),
-        )?;
-
-        // Creating HeaderSigner should fail
         assert!(matches!(
-            HeaderSigner::new(&key_material),
+            KeyMaterial::new_sign_key(
+                None,
+                None,
+                Some("invalid_algorithm".to_string()),
+                None,
+                None,
+            ),
             Err(CryptoTensorError::InvalidAlgorithm(_))
         ));
 
@@ -1867,23 +1996,13 @@ mod tests {
     /// Test if two repetitive signing will generate the same signature
     #[test]
     fn test_header_signer_signature_repeat() -> Result<(), CryptoTensorError> {
-        // Generate Ed25519 key pair
-        let rng = SystemRandom::new();
-        let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng)
-            .map_err(|e| CryptoTensorError::KeyCreation(e.to_string()))?;
-        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref())
-            .map_err(|e| CryptoTensorError::KeyCreation(e.to_string()))?;
-        let public_key = key_pair.public_key().as_ref().to_vec();
-
-        // Create key material
-        let key_material = KeyMaterial::new(
-            "okp".to_string(),
-            "ed25519".to_string(),
+        // Create key material (random key pair)
+        let key_material = KeyMaterial::new_sign_key(
             None,
             None,
             None,
-            Some(public_key),
-            Some(pkcs8_bytes.as_ref().to_vec()),
+            None,
+            None,
         )?;
 
         // Test data
@@ -1908,202 +2027,51 @@ mod tests {
     /// Test KeyMaterial creation and validation
     #[test]
     fn test_key_material_creation_and_validation() {
-        // Test normal encryption key creation
-        let enc_key = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            Some("test-enc-key".to_string()),
-            Some("file:///test/enc.jwk".to_string()),
-            Some(vec![1u8; 32]),
-            None,
-            None,
-        ).unwrap();
-
+        // Test default encryption key creation
+        let enc_key = KeyMaterial::new_enc_key(None, None, None, None).unwrap();
         assert_eq!(enc_key.key_type, JwkKeyType::Oct);
         assert_eq!(enc_key.alg, "aes256gcm");
 
-        // Test normal signing key creation
-        let sign_key = KeyMaterial::new(
-            "okp".to_string(),
-            "ed25519".to_string(),
-            Some("test-sign-key".to_string()),
-            Some("file:///test/sign.jwk".to_string()),
-            None,
-            Some(vec![1u8; 32]),
-            Some(vec![1u8; 32]),
-        ).unwrap();
-
+        // Test default signing key creation
+        let sign_key = KeyMaterial::new_sign_key(None, None, None, None, None).unwrap();
         assert_eq!(sign_key.key_type, JwkKeyType::Okp);
         assert_eq!(sign_key.alg, "ed25519");
 
-        // Test error cases
-        // 1. Invalid key type
-        let result = KeyMaterial::new(
-            "invalid_type".to_string(),
-            "aes256gcm".to_string(),
-            Some("test-key".to_string()),
-            Some("file:///test.jwk".to_string()),
-            Some(vec![1u8; 32]),
+        // Test validation in Save mode
+        // Test missing jku in Save mode (should pass)
+        let save_key = KeyMaterial::new_enc_key(
             None,
-            None,
-        );
-        assert!(matches!(result, Err(CryptoTensorError::InvalidKey(_))));
-
-        // 2. Test validation in Save mode
-        // 2.1 Test missing alg in Save mode (should error)
-        let save_key = KeyMaterial::new(
-            "oct".to_string(),
-            "".to_string(), // Missing algorithm
-            Some("test-key".to_string()),
-            Some("file:///test.jwk".to_string()),
-            Some(vec![1u8; 32]),
-            None,
-            None,
-        ).unwrap();
-        assert!(matches!(
-            save_key.validate(ValidateMode::Save),
-            Err(CryptoTensorError::InvalidAlgorithm(_))
-        ));
-
-        // 2.2 Test missing jku in Save mode (should pass)
-        let save_key = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
+            Some("aes256gcm".to_string()),
             Some("test-key".to_string()),
             None, // Missing jku
-            Some(vec![1u8; 32]),
-            None,
-            None,
         ).unwrap();
         assert!(save_key.validate(ValidateMode::Save).is_ok());
 
-        // 2.3 Test missing key in Save mode (should error)
-        let save_key = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            Some("test-key".to_string()),
-            Some("file:///test.jwk".to_string()),
-            None, // Missing key
-            None,
-            None,
-        ).unwrap();
+        // Test missing kid, jku and key in Load mode (should pass)
+        let header = serde_json::json!({
+            "kty": "oct",
+            "alg": "aes256gcm",
+        });
+        assert!(KeyMaterial::from_header(&header).is_ok());
+
+        // Test missing algorithm in Load mode (should error)
+        let header = serde_json::json!({
+            "kty": "oct",
+        });
         assert!(matches!(
-            save_key.validate(ValidateMode::Save),
-            Err(CryptoTensorError::MissingMasterKey)
+            KeyMaterial::from_header(&header),
+            Err(CryptoTensorError::InvalidKey(_))
         ));
 
-        // 2.4 Test invalid algorithm in Save mode (should error)
-        let save_key = KeyMaterial::new(
-            "oct".to_string(),
-            "invalid_algorithm".to_string(), // Invalid algorithm
-            Some("test-key".to_string()),
-            Some("file:///test.jwk".to_string()),
-            Some(vec![1u8; 32]),
-            None,
-            None,
-        ).unwrap();
+        // Test invalid algorithm in Load mode (should error)
+        let header = serde_json::json!({
+            "kty": "oct",
+            "alg": "invalid_algorithm",
+        });
         assert!(matches!(
-            save_key.validate(ValidateMode::Save),
+            KeyMaterial::from_header(&header),
             Err(CryptoTensorError::InvalidAlgorithm(_))
         ));
-
-        // 3. Test validation in Load mode
-        // 3.1 Test missing jku in Load mode (should pass)
-        let load_key = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            Some("test-key".to_string()),
-            None, // Missing jku
-            Some(vec![1u8; 32]),
-            None,
-            None,
-        ).unwrap();
-        assert!(load_key.validate(ValidateMode::Load).is_ok());
-
-        // 3.2 Test missing key in Load mode (should pass)
-        let load_key = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            Some("test-key".to_string()),
-            Some("file:///test.jwk".to_string()),
-            None, // Missing key
-            None,
-            None,
-        ).unwrap();
-        assert!(load_key.validate(ValidateMode::Load).is_ok());
-
-        // 3.3 Test missing algorithm in Load mode (should error)
-        let load_key = KeyMaterial::new(
-            "oct".to_string(),
-            "".to_string(), // Missing algorithm
-            Some("test-key".to_string()),
-            Some("file:///test.jwk".to_string()),
-            Some(vec![1u8; 32]),
-            None,
-            None,
-        ).unwrap();
-        assert!(matches!(
-            load_key.validate(ValidateMode::Load),
-            Err(CryptoTensorError::InvalidAlgorithm(_))
-        ));
-
-        // 3.4 Test invalid algorithm in Load mode (should error)
-        let load_key = KeyMaterial::new(
-            "oct".to_string(),
-            "invalid_algorithm".to_string(), // Invalid algorithm
-            Some("test-key".to_string()),
-            Some("file:///test.jwk".to_string()),
-            Some(vec![1u8; 32]),
-            None,
-            None,
-        ).unwrap();
-        assert!(matches!(
-            load_key.validate(ValidateMode::Load),
-            Err(CryptoTensorError::InvalidAlgorithm(_))
-        ));
-
-        // 4. Test key validation in Save mode
-        // 4.1 Test enc type without providing key (should error)
-        let enc_key = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            Some("test-key".to_string()),
-            Some("file:///test.jwk".to_string()),
-            None, // No key provided
-            None,
-            None,
-        ).unwrap();
-        assert!(matches!(
-            enc_key.validate(ValidateMode::Save),
-            Err(CryptoTensorError::MissingMasterKey)
-        ));
-
-        // 4.2 Test sig type without providing private key (should error)
-        let sign_key = KeyMaterial::new(
-            "okp".to_string(),
-            "ed25519".to_string(),
-            Some("test-key".to_string()),
-            Some("file:///test.jwk".to_string()),
-            None,
-            Some(vec![1u8; 32]), // Only public key
-            None, // No private key
-        ).unwrap();
-        assert!(matches!(
-            sign_key.validate(ValidateMode::Save),
-            Err(CryptoTensorError::MissingSigningKey)
-        ));
-
-        // 4.3 Test sig type without providing public key (should pass)
-        let sign_key = KeyMaterial::new(
-            "okp".to_string(),
-            "ed25519".to_string(),
-            Some("test-key".to_string()),
-            Some("file:///test.jwk".to_string()),
-            None,
-            None, // No public key
-            Some(vec![1u8; 32]), // Only private key
-        ).unwrap();
-        assert!(sign_key.validate(ValidateMode::Save).is_ok());
     }
 
     /// Test KeyMaterial key loading functionality
@@ -2113,28 +2081,20 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let test_file = temp_dir.path().join("test.jwk");
 
-        // Write single key JWK file content directly
-        let jwk_content = r#"{
-            "kty": "oct",
-            "alg": "aes256gcm",
-            "kid": "test-key",
-            "k": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
-        }"#;
-
-        // Write to file
+        // Write single key JWK file
+        let key = KeyMaterial::new_enc_key(None, Some("aes256gcm".to_string()), Some("test-key".to_string()), None).unwrap();
+        let jwk_content = key.to_jwk().unwrap();
         fs::write(&test_file, jwk_content)
             .map_err(|e| CryptoTensorError::KeyLoad { source: e.to_string() })?;
 
         // Create KeyMaterial and attempt to load key
-        let key_material = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            Some("test-key".to_string()),
-            Some(format!("file://{}", test_file.to_str().unwrap())),
-            None,
-            None,
-            None,
-        )?;
+        let header = serde_json::json!({
+            "kty": "oct",
+            "alg": "aes256gcm",
+            "kid": "test-key",
+            "jku": format!("file://{}", test_file.to_str().unwrap()),
+        });
+        let key_material = KeyMaterial::from_header(&header)?;
 
         // Load key
         assert!(key_material.load_key().is_ok());
@@ -2151,38 +2111,29 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let test_file = temp_dir.path().join("test.jwk");
 
-        // Write JWK Set file content
-        let jwk_set_content = r#"{
-            "keys": [
-                {
-                    "kty": "oct",
-                    "alg": "aes256gcm",
-                    "kid": "key1",
-                    "k": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
-                },
-                {
-                    "kty": "oct",
-                    "alg": "aes256gcm",
-                    "kid": "key2",
-                    "k": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg="
-                }
-            ]
-        }"#;
+        // Create JWK Set file content
+        let key1 = KeyMaterial::new_enc_key(None, Some("aes256gcm".to_string()), Some("key1".to_string()), None).unwrap();
+        let key2 = KeyMaterial::new_enc_key(None, Some("aes256gcm".to_string()), Some("key2".to_string()), None).unwrap();
+        let jwk_set_content = format!(
+            r#"{{
+                "keys": [
+                    {},
+                    {}
+                ]
+            }}"#, key1.to_jwk().unwrap(), key2.to_jwk().unwrap());
 
         // Write to file
         fs::write(&test_file, jwk_set_content)
             .map_err(|e| CryptoTensorError::KeyLoad { source: e.to_string() })?;
 
         // Test loading first key
-        let key_material = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            Some("key1".to_string()),
-            Some(format!("file://{}", test_file.to_str().unwrap())),
-            None,
-            None,
-            None,
-        )?;
+        let header = serde_json::json!({
+            "kty": "oct",
+            "alg": "aes256gcm",
+            "kid": "key1",
+            "jku": format!("file://{}", test_file.to_str().unwrap()),
+        });
+        let key_material = KeyMaterial::from_header(&header)?;
 
         // Load key
         let load_result = key_material.load_key();
@@ -2190,15 +2141,13 @@ mod tests {
         assert!(key_material.k.get().is_some());
 
         // Test loading second key
-        let key_material = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            Some("key2".to_string()),
-            Some(format!("file://{}", test_file.to_str().unwrap())),
-            None,
-            None,
-            None,
-        )?;
+        let header = serde_json::json!({
+            "kty": "oct",
+            "alg": "aes256gcm",
+            "kid": "key2",
+            "jku": format!("file://{}", test_file.to_str().unwrap()),
+        });
+        let key_material = KeyMaterial::from_header(&header)?;
 
         // Load key
         let load_result = key_material.load_key();
@@ -2206,15 +2155,13 @@ mod tests {
         assert!(key_material.k.get().is_some());
 
         // Test loading non-existent key
-        let key_material = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            Some("non-existent".to_string()),
-            Some(format!("file://{}", test_file.to_str().unwrap())),
-            None,
-            None,
-            None,
-        )?;
+        let header = serde_json::json!({
+            "kty": "oct",
+            "alg": "aes256gcm",
+            "kid": "non-existent",
+            "jku": format!("file://{}", test_file.to_str().unwrap()),
+        });
+        let key_material = KeyMaterial::from_header(&header)?;
 
         // Loading key should fail
         let load_result = key_material.load_key();
@@ -2234,23 +2181,15 @@ mod tests {
         let test_file = temp_dir.path().join("test.jwk");
 
         // Write JWK Set file content
-        let jwk_set_content = r#"{
-            "keys": [
-                {
-                    "kty": "oct",
-                    "alg": "aes256gcm",
-                    "kid": "key1",
-                    "k": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
-                },
-                {
-                    "kty": "okp",
-                    "alg": "ed25519",
-                    "kid": "key2",
-                    "x": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
-                    "d": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg="
-                }
-            ]
-        }"#;
+        let key1 = KeyMaterial::new_enc_key(None, Some("aes256gcm".to_string()), Some("key1".to_string()), None).unwrap();
+        let key2 = KeyMaterial::new_sign_key(None, None, Some("ed25519".to_string()), Some("key2".to_string()), None).unwrap();
+        let jwk_set_content = format!(
+            r#"{{
+                "keys": [
+                    {},
+                    {}
+                ]
+            }}"#, key1.to_jwk().unwrap(), key2.to_jwk().unwrap());
 
         // Write to file
         fs::write(&test_file, jwk_set_content)
@@ -2261,15 +2200,12 @@ mod tests {
         std::env::set_var("CRYPTOTENSOR_KEY_JKU", file_path);
 
         // Test loading encryption key
-        let enc_key = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            Some("key1".to_string()),
-            None,
-            None,
-            None,
-            None,
-        )?;
+        let header = serde_json::json!({
+            "kty": "oct",
+            "alg": "aes256gcm",
+            "kid": "key1",
+        });
+        let enc_key = KeyMaterial::from_header(&header)?;
 
         // Load key
         let load_result = enc_key.load_key();
@@ -2278,15 +2214,12 @@ mod tests {
         assert!(enc_key.validate(ValidateMode::Load).is_ok());
 
         // Test loading signing key
-        let sign_key = KeyMaterial::new(
-            "okp".to_string(),
-            "ed25519".to_string(),
-            Some("key2".to_string()),
-            None,
-            None,
-            None,
-            None,
-        )?;
+        let header = serde_json::json!({
+            "kty": "okp",
+            "alg": "ed25519",
+            "kid": "key2",
+        });
+        let sign_key = KeyMaterial::from_header(&header)?;
 
         // Load key
         let load_result = sign_key.load_key();
@@ -2310,38 +2243,25 @@ mod tests {
         let default_file = default_dir.join("keys.jwk");
 
         // Write JWK Set file content
-        let jwk_set_content = r#"{
-            "keys": [
-                {
-                    "kty": "oct",
-                    "alg": "aes256gcm",
-                    "kid": "key1",
-                    "k": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
-                },
-                {
-                    "kty": "okp",
-                    "alg": "ed25519",
-                    "kid": "key2",
-                    "x": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
-                    "d": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg="
-                }
-            ]
-        }"#;
-
-        // Write to file
+        let key1 = KeyMaterial::new_enc_key(None, Some("aes256gcm".to_string()), Some("key1".to_string()), None).unwrap();
+        let key2 = KeyMaterial::new_sign_key(None, None, Some("ed25519".to_string()), Some("key2".to_string()), None).unwrap();
+        let jwk_set_content = format!(
+            r#"{{
+                "keys": [
+                    {},
+                    {}
+                ]
+            }}"#, key1.to_jwk().unwrap(), key2.to_jwk().unwrap());
         fs::write(&default_file, jwk_set_content)
             .map_err(|e| CryptoTensorError::KeyLoad { source: e.to_string() })?;
 
         // Test loading encryption key
-        let enc_key = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            Some("key1".to_string()),
-            None,
-            None,
-            None,
-            None,
-        )?;
+        let header = serde_json::json!({
+            "kty": "oct",
+            "alg": "aes256gcm",
+            "kid": "key1",
+        });
+        let enc_key = KeyMaterial::from_header(&header)?;
 
         // Load key
         let load_result = enc_key.load_key();
@@ -2350,15 +2270,12 @@ mod tests {
         assert!(enc_key.validate(ValidateMode::Load).is_ok());
 
         // Test loading signing key
-        let sign_key = KeyMaterial::new(
-            "okp".to_string(),
-            "ed25519".to_string(),
-            Some("key2".to_string()),
-            None,
-            None,
-            None,
-            None,
-        )?;
+        let header = serde_json::json!({
+            "kty": "okp",
+            "alg": "ed25519",
+            "kid": "key2",
+        });
+        let sign_key = KeyMaterial::from_header(&header)?;
 
         // Load key
         let load_result = sign_key.load_key();
@@ -2449,14 +2366,11 @@ mod tests {
         let test_file = temp_dir.path().join("test.jwk");
 
         // Create test key material for encryption
-        let enc_key = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
+        let enc_key = KeyMaterial::new_enc_key(
+            Some(hex::encode(vec![1u8; 32])),
+            Some("aes256gcm".to_string()),
             Some("test-enc-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
-            Some(vec![1u8; 32]),
-            None,
-            None,
         )?;
 
         // Generate Ed25519 key pair for signing
@@ -2468,35 +2382,23 @@ mod tests {
         let public_key = key_pair.public_key().as_ref().to_vec();
 
         // Create test key material for signing
-        let sign_key = KeyMaterial::new(
-            "okp".to_string(),
-            "ed25519".to_string(),
+        let sign_key = KeyMaterial::new_sign_key(
+            Some(hex::encode(public_key.clone())),
+            Some(hex::encode(pkcs8_bytes.as_ref().to_vec())),
+            Some("ed25519".to_string()),
             Some("test-sign-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
-            None,
-            Some(public_key.clone()),
-            Some(pkcs8_bytes.as_ref().to_vec()),
         )?;
 
         // Write key material to file
-        let jwk_content = serde_json::json!({
-            "keys": [
-                {
-                    "kty": "oct",
-                    "alg": "aes256gcm",
-                    "kid": "test-enc-key",
-                    "k": BASE64.encode(vec![1u8; 32])
-                },
-                {
-                    "kty": "okp",
-                    "alg": "ed25519",
-                    "kid": "test-sign-key",
-                    "x": BASE64.encode(public_key),
-                    "d": BASE64.encode(pkcs8_bytes.as_ref())
-                }
-            ]
-        });
-        fs::write(&test_file, serde_json::to_string_pretty(&jwk_content).unwrap())
+        let jwk_content = format!(
+            r#"{{
+                "keys": [
+                    {},
+                    {}
+                ]
+            }}"#, enc_key.to_jwk().unwrap(), sign_key.to_jwk().unwrap());
+        fs::write(&test_file, jwk_content)
             .map_err(|e| CryptoTensorError::KeyLoad { source: e.to_string() })?;
 
         // Create serialization configuration

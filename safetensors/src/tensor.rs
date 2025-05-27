@@ -818,12 +818,9 @@ mod tests {
     #[cfg(not(feature = "std"))]
     extern crate std;
     use crate::crypto::{KeyMaterial, LoadPolicy};
-    use ring::rand::SystemRandom;
-    use ring::signature::{Ed25519KeyPair, KeyPair};
     #[cfg(feature = "std")]
     use std::fs;
     use tempfile;
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
     const MAX_DIMENSION: usize = 8;
     const MAX_SIZE: usize = 8;
@@ -1390,57 +1387,32 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let test_file = temp_dir.path().join("test.jwk");
 
-        // Generate Ed25519 key pair for signing
-        let rng = SystemRandom::new();
-        let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
-        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref()).unwrap();
-        let public_key = key_pair.public_key().as_ref().to_vec();
+        // Generate keys for signing and encryption
+        let enc_key = KeyMaterial::new_enc_key(
+            None, 
+            None, 
+            Some("test-enc-key".to_string()), 
+            Some(format!("file://{}", test_file.to_str().unwrap()),)
+        ).unwrap();
+        
+        let sign_key = KeyMaterial::new_sign_key(
+            None, 
+            None, 
+            None,
+            Some("test-sign-key".to_string()), 
+            Some(format!("file://{}", test_file.to_str().unwrap())),
+        ).unwrap();
+
 
         // Write key material to file
-        let jwk_content = serde_json::json!({
-            "keys": [
-                {
-                    "kty": "oct",
-                    "alg": "aes256gcm",
-                    "kid": "test-enc-key",
-                    "k": BASE64.encode(vec![1u8; 32])
-                },
-                {
-                    "kty": "okp",
-                    "alg": "ed25519",
-                    "kid": "test-sign-key",
-                    "x": BASE64.encode(public_key),
-                    "d": BASE64.encode(pkcs8_bytes.as_ref())
-                }
-            ]
-        });
-        fs::write(&test_file, serde_json::to_string_pretty(&jwk_content).unwrap()).unwrap();
-
-        // Create encryption key
-        let enc_key = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            Some("test-enc-key".to_string()),
-            Some(format!("file://{}", test_file.to_str().unwrap())),
-            None,
-            None,
-            None,
-        ).unwrap();
-
-        // Create signing key
-        let sign_key = KeyMaterial::new(
-            "okp".to_string(),
-            "ed25519".to_string(),
-            Some("test-sign-key".to_string()),
-            Some(format!("file://{}", test_file.to_str().unwrap())),
-            None,
-            None,
-            None,
-        ).unwrap();
-
-        // Load keys
-        enc_key.load_key().unwrap();
-        sign_key.load_key().unwrap();
+        let jwk_content = format!(
+            r#"{{
+                "keys": [
+                    {},
+                    {}
+                ]
+            }}"#, enc_key.to_jwk().unwrap(), sign_key.to_jwk().unwrap());
+        fs::write(&test_file, jwk_content).unwrap();
 
         // Create serialization config
         let dummy_policy = LoadPolicy::new(None, None);
@@ -1500,57 +1472,33 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let test_file = temp_dir.path().join("test.jwk");
 
-        // Generate Ed25519 key pair for signing
-        let rng = SystemRandom::new();
-        let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
-        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref()).unwrap();
-        let public_key = key_pair.public_key().as_ref().to_vec();
-
-        // Write key material to file
-        let jwk_content = serde_json::json!({
-            "keys": [
-                {
-                    "kty": "oct",
-                    "alg": "aes256gcm",
-                    "kid": "test-enc-key",
-                    "k": BASE64.encode(vec![1u8; 32])
-                },
-                {
-                    "kty": "okp",
-                    "alg": "ed25519",
-                    "kid": "test-sign-key",
-                    "x": BASE64.encode(public_key),
-                    "d": BASE64.encode(pkcs8_bytes.as_ref())
-                }
-            ]
-        });
-        fs::write(&test_file, serde_json::to_string_pretty(&jwk_content).unwrap()).unwrap();
-
-        // Create encryption key
-        let enc_key = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
+        // Generate keys for signing and encryption
+        let enc_key = KeyMaterial::new_enc_key(
+            None,
+            None,
             Some("test-enc-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
-            None,
-            None,
-            None,
         ).unwrap();
-
-        // Create signing key
-        let sign_key = KeyMaterial::new(
-            "okp".to_string(),
-            "ed25519".to_string(),
+        let sign_key = KeyMaterial::new_sign_key(
+            None,
+            None,
+            None,
             Some("test-sign-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
-            None,
-            None,
-            None,
         ).unwrap();
 
-        // Load keys
-        enc_key.load_key().unwrap();
-        sign_key.load_key().unwrap();
+        // Write key material to file
+        let jwk_content = format!(
+            r#"{{
+                "keys": [
+                    {enc},
+                    {sign}
+                ]
+            }}"#,
+            enc = enc_key.to_jwk().unwrap(),
+            sign = sign_key.to_jwk().unwrap()
+        );
+        fs::write(&test_file, jwk_content).unwrap();
 
         // Create serialization config
         let dummy_policy = LoadPolicy::new(None, None);
@@ -1607,57 +1555,33 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let test_file = temp_dir.path().join("test.jwk");
 
-        // Generate Ed25519 key pair for signing
-        let rng = SystemRandom::new();
-        let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
-        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref()).unwrap();
-        let public_key = key_pair.public_key().as_ref().to_vec();
-
-        // Write key material to file
-        let jwk_content = serde_json::json!({
-            "keys": [
-                {
-                    "kty": "oct",
-                    "alg": "aes256gcm",
-                    "kid": "test-enc-key",
-                    "k": BASE64.encode(vec![1u8; 32])
-                },
-                {
-                    "kty": "okp",
-                    "alg": "ed25519",
-                    "kid": "test-sign-key",
-                    "x": BASE64.encode(public_key),
-                    "d": BASE64.encode(pkcs8_bytes.as_ref())
-                }
-            ]
-        });
-        fs::write(&test_file, serde_json::to_string_pretty(&jwk_content).unwrap()).unwrap();
-
-        // Create encryption key
-        let enc_key = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
+        // Generate keys for signing and encryption
+        let enc_key = KeyMaterial::new_enc_key(
+            None,
+            None,
             Some("test-enc-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
-            None,
-            None,
-            None,
         ).unwrap();
-
-        // Create signing key
-        let sign_key = KeyMaterial::new(
-            "okp".to_string(),
-            "ed25519".to_string(),
+        let sign_key = KeyMaterial::new_sign_key(
+            None,
+            None,
+            None,
             Some("test-sign-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
-            None,
-            None,
-            None,
         ).unwrap();
 
-        // Load keys
-        enc_key.load_key().unwrap();
-        sign_key.load_key().unwrap();
+        // Write key material to file
+        let jwk_content = format!(
+            r#"{{
+                "keys": [
+                    {enc},
+                    {sign}
+                ]
+            }}"#,
+            enc = enc_key.to_jwk().unwrap(),
+            sign = sign_key.to_jwk().unwrap()
+        );
+        fs::write(&test_file, jwk_content).unwrap();
 
         // Create serialization config
         let dummy_policy = LoadPolicy::new(None, None);
@@ -1704,33 +1628,43 @@ mod tests {
         let metadata: HashMap<String, TensorView> =
             [("attn.0".to_string(), attn_0)].into_iter().collect();
 
-        // Create encryption key
-        let enc_key = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
+        // Create temporary directory for test files
+        let temp_dir = tempfile::tempdir().unwrap();
+        let test_file = temp_dir.path().join("test.jwk");
+
+        // Generate keys for signing and encryption
+        let enc_key = KeyMaterial::new_enc_key(
             None,
             None,
-            Some(vec![1u8; 32]),
+            Some("test-enc-key".to_string()),
+            Some(format!("file://{}", test_file.to_str().unwrap())),
+        ).unwrap();
+        let sign_key = KeyMaterial::new_sign_key(
             None,
             None,
+            None,
+            Some("test-sign-key".to_string()),
+            Some(format!("file://{}", test_file.to_str().unwrap())),
         ).unwrap();
 
-        // Create signing key
-        let sign_key = KeyMaterial::new(
-            "okp".to_string(),
-            "ed25519".to_string(),
-            None,
-            None,
-            None,
-            Some(vec![2u8; 32]),
-            Some(vec![3u8; 32]),
-        ).unwrap();
+        // Write key material to file
+        let jwk_content = format!(
+            r#"{{
+                "keys": [
+                    {enc},
+                    {sign}
+                ]
+            }}"#,
+            enc = enc_key.to_jwk().unwrap(),
+            sign = sign_key.to_jwk().unwrap()
+        );
+        fs::write(&test_file, jwk_content).unwrap();
 
         // Create serialization config
         let dummy_policy = LoadPolicy::new(None, None);
         let serialize_config = SerializeCryptoConfig::new(
             "1".to_string(),
-            Some(vec!["tensor1".to_string()]),
+            Some(vec!["attn.0".to_string()]),
             enc_key,
             sign_key,
             dummy_policy,
@@ -1775,6 +1709,8 @@ mod tests {
                 .flat_map(|f| f.to_le_bytes())
                 .collect::<Vec<_>>()
         );
+        // Clean up test files
+        fs::remove_file(&test_file).unwrap();
     }
 
 }

@@ -2,10 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion, Benchmark
 use safetensors::tensor::*;
 use safetensors::crypto::{KeyMaterial, SerializeCryptoConfig, LoadPolicy};
 use std::collections::HashMap;
-use ring::signature::{Ed25519KeyPair, KeyPair};
-use ring::rand::SystemRandom;
 use std::fs;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 // Returns a sample data of size 2_MB
 fn get_sample_data() -> (Vec<u8>, Vec<usize>, Dtype) {
@@ -17,63 +14,23 @@ fn get_sample_data() -> (Vec<u8>, Vec<usize>, Dtype) {
     (data, shape, dtype)
 }
 
-// Generate Ed25519 key pair
-fn generate_ed25519_keypair() -> (Vec<u8>, Vec<u8>) {
-    let rng = SystemRandom::new();
-    let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
-    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref()).unwrap();
-    let public_key = key_pair.public_key().as_ref().to_vec();
-    let private_key = pkcs8_bytes.as_ref().to_vec();
-    (public_key, private_key)
-}
-
-// Generate JWK file for a given key pair
-fn generate_jwk_file(enc_key: &[u8], sign_pub_key: &[u8], sign_priv_key: &[u8], kid: &str, enc_alg: &str) -> String {
-    let jwk = format!(
-        r#"{{
-            "keys": [
-                {{
-                    "kty": "oct",
-                    "alg": "{}",
-                    "k": "{}",
-                    "kid": "{}_enc"
-                }},
-                {{
-                    "kty": "okp",
-                    "alg": "Ed25519",
-                    "x": "{}",
-                    "d": "{}",
-                    "kid": "{}_sig"
-                }}
-            ]
-        }}"#,
-        enc_alg,
-        BASE64.encode(enc_key),
-        kid,
-        BASE64.encode(sign_pub_key),
-        BASE64.encode(sign_priv_key),
-        kid
-    );
-    jwk
-}
-
 // Benchmark performance of different encryption algorithms with varying encryption ratios
 fn bench_encryption_performance(c: &mut Criterion) {
     let (data, shape, dtype) = get_sample_data();
     let n_layers = 5;
     let algorithms = [
-        ("AES-128-GCM", "aes128gcm", 16),
-        ("AES-256-GCM", "aes256gcm", 32),
-        ("ChaCha20-Poly1305", "chacha20poly1305", 32),
+        ("AES-128-GCM", "aes128gcm"),
+        // ("AES-256-GCM", "aes256gcm"),
+        // ("ChaCha20-Poly1305", "chacha20poly1305"),
     ];
 
     let ratios = [
         ("0%", 0),   // No encryption
         ("20%", 1),  // Encrypt 1 tensor
-        ("40%", 2),  // Encrypt 2 tensors
-        ("60%", 3),  // Encrypt 3 tensors
-        ("80%", 4),  // Encrypt 4 tensors
-        ("100%", 5), // Encrypt all tensors
+        // ("40%", 2),  // Encrypt 2 tensors
+        // ("60%", 3),  // Encrypt 3 tensors
+        // ("80%", 4),  // Encrypt 4 tensors
+        // ("100%", 5), // Encrypt all tensors
     ];
 
     let mut group = c.benchmark_group("Serialize 10_MB CryptoTensor");
@@ -85,15 +42,36 @@ fn bench_encryption_performance(c: &mut Criterion) {
     let temp_dir = std::env::temp_dir().join("safetensors_benchmark_jwk");
     fs::create_dir_all(&temp_dir).unwrap();
 
-    for (algo_name, key_algo, key_size) in algorithms.iter() {
-        let master_key = vec![1u8; *key_size];
-        let (sign_pub_key, sign_priv_key) = generate_ed25519_keypair();
-        
-        // Generate JWK file for this algorithm
-        let jwk_content = generate_jwk_file(&master_key, &sign_pub_key, &sign_priv_key, algo_name, key_algo);
+    for (algo_name, key_algo) in algorithms.iter() {
         let jwk_path = temp_dir.join(format!("{}.jwk", algo_name));
-        fs::write(&jwk_path, jwk_content).unwrap();
         let jku = format!("file://{}", jwk_path.to_str().unwrap());
+
+        let enc_key = KeyMaterial::new_enc_key(
+            None,
+            Some(key_algo.to_string()),
+            Some(format!("{}_enc", algo_name)),
+            Some(jku.clone()),
+        ).unwrap();
+        let sign_key = KeyMaterial::new_sign_key(
+            None,
+            None,
+            None,
+            Some(format!("{}_sig", algo_name)),
+            Some(jku.clone()),
+        ).unwrap();
+
+        // Write JWK file
+        let jwk_content = format!(
+            r#"{{
+                "keys": [
+                    {},
+                    {}
+                ]
+            }}"#,
+            enc_key.to_jwk().unwrap(),
+            sign_key.to_jwk().unwrap()
+        );
+        fs::write(&jwk_path, jwk_content).unwrap();
 
         for (ratio_name, n_encrypted) in ratios.iter() {
             let mut metadata: HashMap<String, TensorView> = HashMap::new();
@@ -107,32 +85,12 @@ fn bench_encryption_performance(c: &mut Criterion) {
                 .map(|i| format!("weight{i}"))
                 .collect();
 
-            let enc_key = KeyMaterial::new(
-                "oct".to_string(),
-                key_algo.to_string(),
-                Some(format!("{}_enc", algo_name)),
-                Some(jku.clone()),
-                Some(master_key.clone()),
-                None,
-                None,
-            ).unwrap();
-
-            let sign_key = KeyMaterial::new(
-                "okp".to_string(),
-                "Ed25519".to_string(),
-                Some(format!("{}_sig", algo_name)),
-                Some(jku.clone()),
-                None,
-                Some(sign_pub_key.clone()),
-                Some(sign_priv_key.clone()),
-            ).unwrap();
-
             let dummy_policy = LoadPolicy::new(None, None);
             let crypto_config = SerializeCryptoConfig::new(
                 "1".to_string(),
                 Some(tensors_to_encrypt),
-                enc_key,
-                sign_key,
+                enc_key.clone(),
+                sign_key.clone(),
                 dummy_policy,
             ).unwrap();
 
@@ -159,9 +117,9 @@ fn bench_decryption_performance(c: &mut Criterion) {
     let (data, shape, dtype) = get_sample_data();
     let n_layers = 5;
     let algorithms = [
-        ("AES-128-GCM", "aes128gcm", 16),
-        ("AES-256-GCM", "aes256gcm", 32),
-        ("ChaCha20-Poly1305", "chacha20poly1305", 32),
+        ("AES-128-GCM", "aes128gcm"),
+        ("AES-256-GCM", "aes256gcm"),
+        ("ChaCha20-Poly1305", "chacha20poly1305"),
     ];
 
     let mut group = c.benchmark_group("Deserialize 10_MB CryptoTensor");
@@ -173,15 +131,36 @@ fn bench_decryption_performance(c: &mut Criterion) {
     let temp_dir = std::env::temp_dir().join("safetensors_benchmark_jwk");
     fs::create_dir_all(&temp_dir).unwrap();
 
-    for (algo_name, key_algo, key_size) in algorithms.iter() {
-        let master_key = vec![1u8; *key_size];
-        let (sign_pub_key, sign_priv_key) = generate_ed25519_keypair();
-        
-        // Generate JWK file for this algorithm
-        let jwk_content = generate_jwk_file(&master_key, &sign_pub_key, &sign_priv_key, algo_name, key_algo);
+    for (algo_name, key_algo) in algorithms.iter() {
         let jwk_path = temp_dir.join(format!("{}.jwk", algo_name));
-        fs::write(&jwk_path, jwk_content).unwrap();
         let jku = format!("file://{}", jwk_path.to_str().unwrap());
+
+        let enc_key = KeyMaterial::new_enc_key(
+            None,
+            Some(key_algo.to_string()),
+            Some(format!("{}_enc", algo_name)),
+            Some(jku.clone()),
+        ).unwrap();
+        let sign_key = KeyMaterial::new_sign_key(
+            None,
+            None,
+            None,
+            Some(format!("{}_sig", algo_name)),
+            Some(jku.clone()),
+        ).unwrap();
+
+        // Write JWK file
+        let jwk_content = format!(
+            r#"{{
+                "keys": [
+                    {},
+                    {}
+                ]
+            }}"#,
+            enc_key.to_jwk().unwrap(),
+            sign_key.to_jwk().unwrap()
+        );
+        fs::write(&jwk_path, jwk_content).unwrap();
 
         let mut metadata: HashMap<String, TensorView> = HashMap::new();
         for i in 0..n_layers {
@@ -189,32 +168,12 @@ fn bench_decryption_performance(c: &mut Criterion) {
             metadata.insert(format!("weight{i}"), tensor);
         }
 
-        let enc_key = KeyMaterial::new(
-            "oct".to_string(),
-            key_algo.to_string(),
-            Some(format!("{}_enc", algo_name)),
-            Some(jku.clone()),
-            Some(master_key.clone()),
-            None,
-            None,
-        ).unwrap();
-
-        let sign_key = KeyMaterial::new(
-            "okp".to_string(),
-            "Ed25519".to_string(),
-            Some(format!("{}_sig", algo_name)),
-            Some(jku.clone()),
-            None,
-            Some(sign_pub_key.clone()),
-            Some(sign_priv_key.clone()),
-        ).unwrap();
-
         let dummy_policy = LoadPolicy::new(None, None);
         let crypto_config = SerializeCryptoConfig::new(
             "1".to_string(),
             None,
-            enc_key,
-            sign_key,
+            enc_key.clone(),
+            sign_key.clone(),
             dummy_policy,
         ).unwrap();
 
