@@ -211,14 +211,6 @@ fn pykeymaterial_from_dict(dict: &PyBound<PyDict>) -> PyResult<KeyMaterial> {
     let alg = dict.get_item("alg")?
         .ok_or_else(|| SafetensorError::new_err("Missing 'alg' in key dict"))?
         .extract::<String>()?;
-    let use_ = match dict.get_item("use")? {
-        Some(v) => Some(v.extract::<String>()?),
-        None => None,
-    };
-    let key_ops = match dict.get_item("key_ops")? {
-        Some(v) => Some(v.extract::<Vec<String>>()?),
-        None => None,
-    };
     let kid = match dict.get_item("kid")? {
         Some(v) => Some(v.extract::<String>()?),
         None => None,
@@ -239,7 +231,7 @@ fn pykeymaterial_from_dict(dict: &PyBound<PyDict>) -> PyResult<KeyMaterial> {
         Some(v) => Some(v.extract::<Vec<u8>>()?),
         None => None,
     };
-    KeyMaterial::new(key_type, alg, use_, key_ops, kid, jku, k, x_pub, d_priv)
+    KeyMaterial::new(key_type, alg, kid, jku, k, x_pub, d_priv)
         .map_err(|e| SafetensorError::new_err(format!("Failed to build KeyMaterial: {e}")))
 }
 

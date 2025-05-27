@@ -34,16 +34,12 @@ fn generate_jwk_file(enc_key: &[u8], sign_pub_key: &[u8], sign_priv_key: &[u8], 
             "keys": [
                 {{
                     "kty": "oct",
-                    "use": "enc",
-                    "key_ops": ["encrypt", "decrypt"],
                     "alg": "{}",
                     "k": "{}",
                     "kid": "{}_enc"
                 }},
                 {{
                     "kty": "okp",
-                    "use": "sig",
-                    "key_ops": ["sign", "verify"],
                     "alg": "Ed25519",
                     "x": "{}",
                     "d": "{}",
@@ -74,10 +70,10 @@ fn bench_encryption_performance(c: &mut Criterion) {
     let ratios = [
         ("0%", 0),   // No encryption
         ("20%", 1),  // Encrypt 1 tensor
-        // ("40%", 2),  // Encrypt 2 tensors
-        // ("60%", 3),  // Encrypt 3 tensors
-        // ("80%", 4),  // Encrypt 4 tensors
-        // ("100%", 5), // Encrypt all tensors
+        ("40%", 2),  // Encrypt 2 tensors
+        ("60%", 3),  // Encrypt 3 tensors
+        ("80%", 4),  // Encrypt 4 tensors
+        ("100%", 5), // Encrypt all tensors
     ];
 
     let mut group = c.benchmark_group("Serialize 10_MB CryptoTensor");
@@ -114,8 +110,6 @@ fn bench_encryption_performance(c: &mut Criterion) {
             let enc_key = KeyMaterial::new(
                 "oct".to_string(),
                 key_algo.to_string(),
-                Some("enc".to_string()),
-                Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
                 Some(format!("{}_enc", algo_name)),
                 Some(jku.clone()),
                 Some(master_key.clone()),
@@ -126,8 +120,6 @@ fn bench_encryption_performance(c: &mut Criterion) {
             let sign_key = KeyMaterial::new(
                 "okp".to_string(),
                 "Ed25519".to_string(),
-                Some("sig".to_string()),
-                Some(vec!["sign".to_string(), "verify".to_string()]),
                 Some(format!("{}_sig", algo_name)),
                 Some(jku.clone()),
                 None,
@@ -200,8 +192,6 @@ fn bench_decryption_performance(c: &mut Criterion) {
         let enc_key = KeyMaterial::new(
             "oct".to_string(),
             key_algo.to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some(format!("{}_enc", algo_name)),
             Some(jku.clone()),
             Some(master_key.clone()),
@@ -212,8 +202,6 @@ fn bench_decryption_performance(c: &mut Criterion) {
         let sign_key = KeyMaterial::new(
             "okp".to_string(),
             "Ed25519".to_string(),
-            Some("sig".to_string()),
-            Some(vec!["sign".to_string(), "verify".to_string()]),
             Some(format!("{}_sig", algo_name)),
             Some(jku.clone()),
             None,

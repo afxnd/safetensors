@@ -297,40 +297,6 @@ enum JwkKeyUse {
     Enc,
 }
 
-impl JwkKeyUse {
-    /// Convert a string representation to a key use
-    fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "sig" => Some(JwkKeyUse::Sig),
-            "enc" => Some(JwkKeyUse::Enc),
-            _ => None,
-        }
-    }
-}
-
-/// JSON Web Key (JWK) operations
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum JwkKeyOperation {
-    Sign,
-    Verify,
-    Encrypt,
-    Decrypt,
-}
-
-impl JwkKeyOperation {
-    /// Convert a string representation to a key operation
-    fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "sign" => Some(JwkKeyOperation::Sign),
-            "verify" => Some(JwkKeyOperation::Verify),
-            "encrypt" => Some(JwkKeyOperation::Encrypt),
-            "decrypt" => Some(JwkKeyOperation::Decrypt),
-            _ => None,
-        }
-    }
-}
-
 /// Serialize and deserialize OnceCell<Option<String>>
 mod once_cell_option {
     use super::*;
@@ -354,13 +320,6 @@ mod once_cell_option {
 pub struct KeyMaterial {
     #[serde(rename = "kty")]
     key_type: JwkKeyType,
-    
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "use")]
-    use_: Option<JwkKeyUse>,
-    
-    #[serde(skip_serializing_if = "Option::is_none")]
-    key_ops: Option<Vec<JwkKeyOperation>>,
     
     alg: String,
     
@@ -393,8 +352,6 @@ impl KeyMaterial {
     pub fn new(
         key_type: String,
         alg: String,
-        use_: Option<String>,
-        key_ops: Option<Vec<String>>,
         kid: Option<String>,
         jku: Option<String>,
         k: Option<Vec<u8>>,
@@ -404,17 +361,6 @@ impl KeyMaterial {
         let key_material = Self {
             key_type: JwkKeyType::from_str(&key_type)
                 .ok_or_else(|| CryptoTensorError::InvalidKey(format!("Invalid key type: {}", key_type)))?,
-            use_: use_.as_deref()
-                .map(|u| JwkKeyUse::from_str(u)
-                    .ok_or_else(|| CryptoTensorError::InvalidKey(format!("Invalid key use: {}", u))))
-                .transpose()?,
-            key_ops: key_ops.map(|ops| {
-                let valid_ops: Result<Vec<JwkKeyOperation>, CryptoTensorError> = ops.iter()
-                    .map(|op| JwkKeyOperation::from_str(op)
-                        .ok_or_else(|| CryptoTensorError::InvalidKey(format!("Invalid key operation: {}", op))))
-                    .collect();
-                valid_ops
-            }).transpose()?,
             alg,
             kid,
             k: OnceCell::new(),
@@ -577,24 +523,6 @@ impl KeyMaterial {
                 JwkKeyType::Okp => {
                     if SignatureAlgorithm::from_str(&self.alg).is_none() {
                         return Err(CryptoTensorError::InvalidAlgorithm("Invalid signature algorithm".to_string()));
-                    }
-                }
-            }
-        }
-
-        // Validate consistency between use and operations if present
-        if let Some(use_) = &self.use_ {
-            if let Some(ops) = &self.key_ops {
-                match use_ {
-                    JwkKeyUse::Sig => {
-                        if !ops.contains(&JwkKeyOperation::Sign) && !ops.contains(&JwkKeyOperation::Verify) {
-                            return Err(CryptoTensorError::InvalidKey("Signature key use requires sign or verify operations".to_string()));
-                        }
-                    }
-                    JwkKeyUse::Enc => {
-                        if !ops.contains(&JwkKeyOperation::Encrypt) && !ops.contains(&JwkKeyOperation::Decrypt) {
-                            return Err(CryptoTensorError::InvalidKey("Encryption key use requires encrypt or decrypt operations".to_string()));
-                        }
                     }
                 }
             }
@@ -1698,8 +1626,6 @@ mod tests {
         let key_material = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             None,
             None,
             Some(master_key),
@@ -1731,8 +1657,6 @@ mod tests {
         let key_material = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             None,
             None,
             Some(master_key),
@@ -1764,8 +1688,6 @@ mod tests {
         let key_material = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             None,
             None,
             Some(master_key),
@@ -1805,8 +1727,6 @@ mod tests {
             let key_material = KeyMaterial::new(
                 "oct".to_string(),
                 key_algo.to_string(),
-                Some("enc".to_string()),
-                Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
                 None,
                 None,
                 Some(master_key),
@@ -1846,8 +1766,6 @@ mod tests {
         let key_material = KeyMaterial::new(
             "okp".to_string(),
             "ed25519".to_string(),
-            Some("sig".to_string()),
-            Some(vec!["sign".to_string(), "verify".to_string()]),
             None,
             None,
             None,
@@ -1891,8 +1809,6 @@ mod tests {
         let key_material = KeyMaterial::new(
             "okp".to_string(),
             "ed25519".to_string(),
-            Some("sig".to_string()),
-            Some(vec!["sign".to_string(), "verify".to_string()]),
             None,
             None,
             None,
@@ -1913,8 +1829,6 @@ mod tests {
         let key_material = KeyMaterial::new(
             "okp".to_string(),
             "ed25519".to_string(),
-            Some("sig".to_string()),
-            Some(vec!["sign".to_string(), "verify".to_string()]),
             None,
             None,
             None,
@@ -1934,8 +1848,6 @@ mod tests {
         let key_material = KeyMaterial::new(
             "okp".to_string(),
             "invalid_algorithm".to_string(), // Invalid algorithm
-            Some("sig".to_string()),
-            Some(vec!["sign".to_string(), "verify".to_string()]),
             None,
             None,
             None,
@@ -1967,8 +1879,6 @@ mod tests {
         let key_material = KeyMaterial::new(
             "okp".to_string(),
             "ed25519".to_string(),
-            Some("sig".to_string()),
-            Some(vec!["sign".to_string(), "verify".to_string()]),
             None,
             None,
             None,
@@ -2002,8 +1912,6 @@ mod tests {
         let enc_key = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("test-enc-key".to_string()),
             Some("file:///test/enc.jwk".to_string()),
             Some(vec![1u8; 32]),
@@ -2013,14 +1921,11 @@ mod tests {
 
         assert_eq!(enc_key.key_type, JwkKeyType::Oct);
         assert_eq!(enc_key.alg, "aes256gcm");
-        assert_eq!(enc_key.use_, Some(JwkKeyUse::Enc));
 
         // Test normal signing key creation
         let sign_key = KeyMaterial::new(
             "okp".to_string(),
             "ed25519".to_string(),
-            Some("sig".to_string()),
-            Some(vec!["sign".to_string(), "verify".to_string()]),
             Some("test-sign-key".to_string()),
             Some("file:///test/sign.jwk".to_string()),
             None,
@@ -2030,15 +1935,12 @@ mod tests {
 
         assert_eq!(sign_key.key_type, JwkKeyType::Okp);
         assert_eq!(sign_key.alg, "ed25519");
-        assert_eq!(sign_key.use_, Some(JwkKeyUse::Sig));
 
         // Test error cases
         // 1. Invalid key type
         let result = KeyMaterial::new(
             "invalid_type".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("test-key".to_string()),
             Some("file:///test.jwk".to_string()),
             Some(vec![1u8; 32]),
@@ -2047,41 +1949,11 @@ mod tests {
         );
         assert!(matches!(result, Err(CryptoTensorError::InvalidKey(_))));
 
-        // 2. Invalid key use
-        let result = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            Some("invalid_use".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
-            Some("test-key".to_string()),
-            Some("file:///test.jwk".to_string()),
-            Some(vec![1u8; 32]),
-            None,
-            None,
-        );
-        assert!(matches!(result, Err(CryptoTensorError::InvalidKey(_))));
-
-        // 3. Invalid operation type
-        let result = KeyMaterial::new(
-            "oct".to_string(),
-            "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["invalid_op".to_string()]),
-            Some("test-key".to_string()),
-            Some("file:///test.jwk".to_string()),
-            Some(vec![1u8; 32]),
-            None,
-            None,
-        );
-        assert!(matches!(result, Err(CryptoTensorError::InvalidKey(_))));
-
-        // 4. Test validation in Save mode
-        // 4.1 Test missing alg in Save mode (should error)
+        // 2. Test validation in Save mode
+        // 2.1 Test missing alg in Save mode (should error)
         let save_key = KeyMaterial::new(
             "oct".to_string(),
             "".to_string(), // Missing algorithm
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("test-key".to_string()),
             Some("file:///test.jwk".to_string()),
             Some(vec![1u8; 32]),
@@ -2093,12 +1965,10 @@ mod tests {
             Err(CryptoTensorError::InvalidAlgorithm(_))
         ));
 
-        // 4.2 Test missing jku in Save mode (should pass)
+        // 2.2 Test missing jku in Save mode (should pass)
         let save_key = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("test-key".to_string()),
             None, // Missing jku
             Some(vec![1u8; 32]),
@@ -2107,12 +1977,10 @@ mod tests {
         ).unwrap();
         assert!(save_key.validate(ValidateMode::Save).is_ok());
 
-        // 4.3 Test missing key in Save mode (should error)
+        // 2.3 Test missing key in Save mode (should error)
         let save_key = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("test-key".to_string()),
             Some("file:///test.jwk".to_string()),
             None, // Missing key
@@ -2124,12 +1992,10 @@ mod tests {
             Err(CryptoTensorError::MissingMasterKey)
         ));
 
-        // 4.4 Test invalid algorithm in Save mode (should error)
+        // 2.4 Test invalid algorithm in Save mode (should error)
         let save_key = KeyMaterial::new(
             "oct".to_string(),
             "invalid_algorithm".to_string(), // Invalid algorithm
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("test-key".to_string()),
             Some("file:///test.jwk".to_string()),
             Some(vec![1u8; 32]),
@@ -2141,13 +2007,11 @@ mod tests {
             Err(CryptoTensorError::InvalidAlgorithm(_))
         ));
 
-        // 5. Test validation in Load mode
-        // 5.1 Test missing jku in Load mode (should pass)
+        // 3. Test validation in Load mode
+        // 3.1 Test missing jku in Load mode (should pass)
         let load_key = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("test-key".to_string()),
             None, // Missing jku
             Some(vec![1u8; 32]),
@@ -2156,12 +2020,10 @@ mod tests {
         ).unwrap();
         assert!(load_key.validate(ValidateMode::Load).is_ok());
 
-        // 5.2 Test missing key in Load mode (should pass)
+        // 3.2 Test missing key in Load mode (should pass)
         let load_key = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("test-key".to_string()),
             Some("file:///test.jwk".to_string()),
             None, // Missing key
@@ -2170,12 +2032,10 @@ mod tests {
         ).unwrap();
         assert!(load_key.validate(ValidateMode::Load).is_ok());
 
-        // 5.3 Test missing algorithm in Load mode (should error)
+        // 3.3 Test missing algorithm in Load mode (should error)
         let load_key = KeyMaterial::new(
             "oct".to_string(),
             "".to_string(), // Missing algorithm
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("test-key".to_string()),
             Some("file:///test.jwk".to_string()),
             Some(vec![1u8; 32]),
@@ -2187,12 +2047,10 @@ mod tests {
             Err(CryptoTensorError::InvalidAlgorithm(_))
         ));
 
-        // 5.4 Test invalid algorithm in Load mode (should error)
+        // 3.4 Test invalid algorithm in Load mode (should error)
         let load_key = KeyMaterial::new(
             "oct".to_string(),
             "invalid_algorithm".to_string(), // Invalid algorithm
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("test-key".to_string()),
             Some("file:///test.jwk".to_string()),
             Some(vec![1u8; 32]),
@@ -2204,13 +2062,11 @@ mod tests {
             Err(CryptoTensorError::InvalidAlgorithm(_))
         ));
 
-        // 6. Test key validation in Save mode
-        // 6.1 Test enc type without providing key (should error)
+        // 4. Test key validation in Save mode
+        // 4.1 Test enc type without providing key (should error)
         let enc_key = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("test-key".to_string()),
             Some("file:///test.jwk".to_string()),
             None, // No key provided
@@ -2222,12 +2078,10 @@ mod tests {
             Err(CryptoTensorError::MissingMasterKey)
         ));
 
-        // 6.2 Test sig type without providing private key (should error)
+        // 4.2 Test sig type without providing private key (should error)
         let sign_key = KeyMaterial::new(
             "okp".to_string(),
             "ed25519".to_string(),
-            Some("sig".to_string()),
-            Some(vec!["sign".to_string(), "verify".to_string()]),
             Some("test-key".to_string()),
             Some("file:///test.jwk".to_string()),
             None,
@@ -2239,12 +2093,10 @@ mod tests {
             Err(CryptoTensorError::MissingSigningKey)
         ));
 
-        // 6.3 Test sig type without providing public key (should pass)
+        // 4.3 Test sig type without providing public key (should pass)
         let sign_key = KeyMaterial::new(
             "okp".to_string(),
             "ed25519".to_string(),
-            Some("sig".to_string()),
-            Some(vec!["sign".to_string(), "verify".to_string()]),
             Some("test-key".to_string()),
             Some("file:///test.jwk".to_string()),
             None,
@@ -2264,8 +2116,6 @@ mod tests {
         // Write single key JWK file content directly
         let jwk_content = r#"{
             "kty": "oct",
-            "use": "enc",
-            "key_ops": ["encrypt", "decrypt"],
             "alg": "aes256gcm",
             "kid": "test-key",
             "k": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
@@ -2279,8 +2129,6 @@ mod tests {
         let key_material = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("test-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
             None,
@@ -2308,16 +2156,12 @@ mod tests {
             "keys": [
                 {
                     "kty": "oct",
-                    "use": "enc",
-                    "key_ops": ["encrypt", "decrypt"],
                     "alg": "aes256gcm",
                     "kid": "key1",
                     "k": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
                 },
                 {
                     "kty": "oct",
-                    "use": "enc",
-                    "key_ops": ["encrypt", "decrypt"],
                     "alg": "aes256gcm",
                     "kid": "key2",
                     "k": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg="
@@ -2333,8 +2177,6 @@ mod tests {
         let key_material = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("key1".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
             None,
@@ -2351,8 +2193,6 @@ mod tests {
         let key_material = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("key2".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
             None,
@@ -2369,8 +2209,6 @@ mod tests {
         let key_material = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("non-existent".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
             None,
@@ -2400,16 +2238,12 @@ mod tests {
             "keys": [
                 {
                     "kty": "oct",
-                    "use": "enc",
-                    "key_ops": ["encrypt", "decrypt"],
                     "alg": "aes256gcm",
                     "kid": "key1",
                     "k": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
                 },
                 {
                     "kty": "okp",
-                    "use": "sig",
-                    "key_ops": ["sign", "verify"],
                     "alg": "ed25519",
                     "kid": "key2",
                     "x": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
@@ -2430,8 +2264,6 @@ mod tests {
         let enc_key = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("key1".to_string()),
             None,
             None,
@@ -2449,8 +2281,6 @@ mod tests {
         let sign_key = KeyMaterial::new(
             "okp".to_string(),
             "ed25519".to_string(),
-            Some("sig".to_string()),
-            Some(vec!["sign".to_string(), "verify".to_string()]),
             Some("key2".to_string()),
             None,
             None,
@@ -2484,16 +2314,12 @@ mod tests {
             "keys": [
                 {
                     "kty": "oct",
-                    "use": "enc",
-                    "key_ops": ["encrypt", "decrypt"],
                     "alg": "aes256gcm",
                     "kid": "key1",
                     "k": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
                 },
                 {
                     "kty": "okp",
-                    "use": "sig",
-                    "key_ops": ["sign", "verify"],
                     "alg": "ed25519",
                     "kid": "key2",
                     "x": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
@@ -2510,8 +2336,6 @@ mod tests {
         let enc_key = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("key1".to_string()),
             None,
             None,
@@ -2529,8 +2353,6 @@ mod tests {
         let sign_key = KeyMaterial::new(
             "okp".to_string(),
             "ed25519".to_string(),
-            Some("sig".to_string()),
-            Some(vec!["sign".to_string(), "verify".to_string()]),
             Some("key2".to_string()),
             None,
             None,
@@ -2630,8 +2452,6 @@ mod tests {
         let enc_key = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("test-enc-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
             Some(vec![1u8; 32]),
@@ -2651,8 +2471,6 @@ mod tests {
         let sign_key = KeyMaterial::new(
             "okp".to_string(),
             "ed25519".to_string(),
-            Some("sig".to_string()),
-            Some(vec!["sign".to_string(), "verify".to_string()]),
             Some("test-sign-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
             None,
@@ -2665,16 +2483,12 @@ mod tests {
             "keys": [
                 {
                     "kty": "oct",
-                    "use": "enc",
-                    "key_ops": ["encrypt", "decrypt"],
                     "alg": "aes256gcm",
                     "kid": "test-enc-key",
                     "k": BASE64.encode(vec![1u8; 32])
                 },
                 {
                     "kty": "okp",
-                    "use": "sig",
-                    "key_ops": ["sign", "verify"],
                     "alg": "ed25519",
                     "kid": "test-sign-key",
                     "x": BASE64.encode(public_key),

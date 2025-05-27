@@ -1401,16 +1401,12 @@ mod tests {
             "keys": [
                 {
                     "kty": "oct",
-                    "use": "enc",
-                    "key_ops": ["encrypt", "decrypt"],
                     "alg": "aes256gcm",
                     "kid": "test-enc-key",
                     "k": BASE64.encode(vec![1u8; 32])
                 },
                 {
                     "kty": "okp",
-                    "use": "sig",
-                    "key_ops": ["sign", "verify"],
                     "alg": "ed25519",
                     "kid": "test-sign-key",
                     "x": BASE64.encode(public_key),
@@ -1424,8 +1420,6 @@ mod tests {
         let enc_key = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("test-enc-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
             None,
@@ -1437,8 +1431,6 @@ mod tests {
         let sign_key = KeyMaterial::new(
             "okp".to_string(),
             "ed25519".to_string(),
-            Some("sig".to_string()),
-            Some(vec!["sign".to_string(), "verify".to_string()]),
             Some("test-sign-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
             None,
@@ -1519,16 +1511,12 @@ mod tests {
             "keys": [
                 {
                     "kty": "oct",
-                    "use": "enc",
-                    "key_ops": ["encrypt", "decrypt"],
                     "alg": "aes256gcm",
                     "kid": "test-enc-key",
                     "k": BASE64.encode(vec![1u8; 32])
                 },
                 {
                     "kty": "okp",
-                    "use": "sig",
-                    "key_ops": ["sign", "verify"],
                     "alg": "ed25519",
                     "kid": "test-sign-key",
                     "x": BASE64.encode(public_key),
@@ -1542,8 +1530,6 @@ mod tests {
         let enc_key = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("test-enc-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
             None,
@@ -1555,8 +1541,6 @@ mod tests {
         let sign_key = KeyMaterial::new(
             "okp".to_string(),
             "ed25519".to_string(),
-            Some("sig".to_string()),
-            Some(vec!["sign".to_string(), "verify".to_string()]),
             Some("test-sign-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
             None,
@@ -1634,16 +1618,12 @@ mod tests {
             "keys": [
                 {
                     "kty": "oct",
-                    "use": "enc",
-                    "key_ops": ["encrypt", "decrypt"],
                     "alg": "aes256gcm",
                     "kid": "test-enc-key",
                     "k": BASE64.encode(vec![1u8; 32])
                 },
                 {
                     "kty": "okp",
-                    "use": "sig",
-                    "key_ops": ["sign", "verify"],
                     "alg": "ed25519",
                     "kid": "test-sign-key",
                     "x": BASE64.encode(public_key),
@@ -1657,8 +1637,6 @@ mod tests {
         let enc_key = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             Some("test-enc-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
             None,
@@ -1670,8 +1648,6 @@ mod tests {
         let sign_key = KeyMaterial::new(
             "okp".to_string(),
             "ed25519".to_string(),
-            Some("sig".to_string()),
-            Some(vec!["sign".to_string(), "verify".to_string()]),
             Some("test-sign-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
             None,
@@ -1732,8 +1708,6 @@ mod tests {
         let enc_key = KeyMaterial::new(
             "oct".to_string(),
             "aes256gcm".to_string(),
-            Some("enc".to_string()),
-            Some(vec!["encrypt".to_string(), "decrypt".to_string()]),
             None,
             None,
             Some(vec![1u8; 32]),
@@ -1745,8 +1719,6 @@ mod tests {
         let sign_key = KeyMaterial::new(
             "okp".to_string(),
             "ed25519".to_string(),
-            Some("sig".to_string()),
-            Some(vec!["sign".to_string(), "verify".to_string()]),
             None,
             None,
             None,
