@@ -16,7 +16,7 @@ def deserialize(bytes):
     pass
 
 @staticmethod
-def serialize(tensor_dict, metadata=None):
+def serialize(tensor_dict, metadata=None, config=None):
     """
     Serializes raw data.
 
@@ -26,6 +26,20 @@ def serialize(tensor_dict, metadata=None):
                 {"tensor_name": {"dtype": "F32", "shape": [2, 3], "data": b"\0\0"}}
         metadata (`Dict[str, str]`, *optional*):
             The optional purely text annotations
+        config (`Dict[str, Any]`, optional):
+            Encryption configuration, structure as follows:
+                {
+                    "tensors": ["tensor1", "tensor2"],  # List of tensor names to encrypt; if None, encrypt all
+                    "enc_key": {  # Encryption key, supports JWK format
+                        "alg": "aes256gcm", "kid": "test-enc-key", "key": "..."
+                    },
+                    "sign_key": {  # Signing key, supports Ed25519, etc.
+                        "alg": "ed25519", "kid": "test-sign-key", "private": "...", "public": "..."
+                    },
+                    "policy": {  # Optional, load policy
+                        "local": "...", "remote": "..."
+                    }
+                }
 
     Returns:
         (`bytes`):
@@ -34,7 +48,7 @@ def serialize(tensor_dict, metadata=None):
     pass
 
 @staticmethod
-def serialize_file(tensor_dict, filename, metadata=None):
+def serialize_file(tensor_dict, filename, metadata=None, config=None):
     """
     Serializes raw data into file.
 
@@ -46,48 +60,26 @@ def serialize_file(tensor_dict, filename, metadata=None):
             The name of the file to write into.
         metadata (`Dict[str, str]`, *optional*):
             The optional purely text annotations
+        config (`Dict[str, Any]`, optional):
+            Encryption configuration, structure as follows:
+                {
+                    "tensors": ["tensor1", "tensor2"],  # List of tensor names to encrypt; if None, encrypt all
+                    "enc_key": {  # Encryption key, supports JWK format
+                        "alg": "aes256gcm", "kid": "test-enc-key", "key": "..."
+                    },
+                    "sign_key": {  # Signing key, supports Ed25519, etc.
+                        "alg": "ed25519", "kid": "test-sign-key", "private": "...", "public": "..."
+                    },
+                    "policy": {  # Optional, load policy
+                        "local": "...", "remote": "..."
+                    }
+                }
 
     Returns:
         (`NoneType`):
-            On success return None.
+            On success return None
     """
     pass
-
-def serialize_encrypted(tensor_dict: dict, metadata: dict = ..., config: dict = ...) -> bytes:
-    """
-    Serializes raw data as encrypted CryptoTensor.
-
-    Args:
-        tensor_dict (Dict[str, Dict[Any]]):
-            The tensor dict, e.g. {"tensor_name": {"dtype": "F32", "shape": [2, 3], "data": b"..."}}
-        metadata (Optional[Dict[str, str]]):
-            Optional text-only annotations.
-        config (Optional[dict]):
-            Encryption configuration, must include encryption/signature keys, etc.
-
-    Returns:
-        bytes: The encrypted safetensors format raw bytes.
-    """
-    ...
-
-def serialize_file_encrypted(tensor_dict: dict, filename, metadata: dict = ..., config: dict = ...) -> None:
-    """
-    Serializes raw data as encrypted CryptoTensor and writes to file.
-
-    Args:
-        tensor_dict (Dict[str, Dict[Any]]):
-            The tensor dict, e.g. {"tensor_name": {"dtype": "F32", "shape": [2, 3], "data": b"..."}}
-        filename (str or os.PathLike):
-            The name of the file to write into.
-        metadata (Optional[Dict[str, str]]):
-            Optional text-only annotations.
-        config (Optional[dict]):
-            Encryption configuration, must include encryption/signature keys, etc.
-
-    Returns:
-        None
-    """
-    ...
 
 class safe_open:
     """
@@ -107,16 +99,19 @@ class safe_open:
 
     def __init__(self, filename, framework, device=...):
         pass
+
     def __enter__(self):
         """
         Start the context manager
         """
         pass
+
     def __exit__(self, _exc_type, _exc_value, _traceback):
         """
         Exits the context manager
         """
         pass
+
     def get_slice(self, name):
         """
         Returns a full slice view object
@@ -138,6 +133,7 @@ class safe_open:
         ```
         """
         pass
+
     def get_tensor(self, name):
         """
         Returns a full tensor
@@ -160,6 +156,7 @@ class safe_open:
         ```
         """
         pass
+
     def keys(self):
         """
         Returns the names of the tensors in the file.
@@ -169,6 +166,7 @@ class safe_open:
                 The name of the tensors contained in that file
         """
         pass
+
     def metadata(self):
         """
         Return the special non tensor information in the header
@@ -176,6 +174,16 @@ class safe_open:
         Returns:
             (`Dict[str, str]`):
                 The freeform metadata.
+        """
+        pass
+
+    def offset_keys(self):
+        """
+        Returns the names of the tensors in the file, ordered by offset.
+
+        Returns:
+            (`List[str]`):
+                The name of the tensors contained in that file
         """
         pass
 

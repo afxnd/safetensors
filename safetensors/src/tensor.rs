@@ -1389,20 +1389,18 @@ mod tests {
 
         // Generate keys for signing and encryption
         let enc_key = KeyMaterial::new_enc_key(
-            None, 
-            None, 
-            Some("test-enc-key".to_string()), 
-            Some(format!("file://{}", test_file.to_str().unwrap()),)
-        ).unwrap();
-        
-        let sign_key = KeyMaterial::new_sign_key(
-            None, 
-            None, 
             None,
-            Some("test-sign-key".to_string()), 
+            None,
+            Some("test-enc-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
         ).unwrap();
-
+        let sign_key = KeyMaterial::new_sign_key(
+            None,
+            None,
+            None,
+            Some("test-sign-key".to_string()),
+            Some(format!("file://{}", test_file.to_str().unwrap())),
+        ).unwrap();
 
         // Write key material to file
         let jwk_content = format!(

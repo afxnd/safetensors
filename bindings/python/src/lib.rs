@@ -108,19 +108,39 @@ fn prepare(tensor_dict: HashMap<String, PyBound<PyDict>>) -> PyResult<HashMap<St
 ///             {"tensor_name": {"dtype": "F32", "shape": [2, 3], "data": b"\0\0"}}
 ///     metadata (`Dict[str, str]`, *optional*):
 ///         The optional purely text annotations
+///     config (`Dict[str, Any]`, optional):
+///         Encryption configuration, structure as follows:
+///             {
+///                 "tensors": ["tensor1", "tensor2"],  # List of tensor names to encrypt; if None, encrypt all
+///                 "enc_key": {  # Encryption key, supports JWK format
+///                     "alg": "aes256gcm", "kid": "test-enc-key", "key": "..."
+///                 },
+///                 "sign_key": {  # Signing key, supports Ed25519, etc.
+///                     "alg": "ed25519", "kid": "test-sign-key", "private": "...", "public": "..."
+///                 },
+///                 "policy": {  # Optional, load policy
+///                     "local": "...", "remote": "..."
+///                 }
+///             }
 ///
 /// Returns:
 ///     (`bytes`):
-///         The serialized content.
+///         The encrypted, serialized safetensors binary content.
+///
+/// Usage examples:
+///     1. Full encryption: config["tensors"] is None or omitted, all tensors are encrypted
+///     2. Partial encryption: config["tensors"] specifies some tensor names, others are stored in plaintext
 #[pyfunction]
-#[pyo3(signature = (tensor_dict, metadata=None))]
+#[pyo3(signature = (tensor_dict, metadata=None, config=None))]
 fn serialize<'b>(
     py: Python<'b>,
     tensor_dict: HashMap<String, PyBound<PyDict>>,
     metadata: Option<HashMap<String, String>>,
+    config: Option<PyBound<PyAny>>,
 ) -> PyResult<PyBound<'b, PyBytes>> {
     let tensors = prepare(tensor_dict)?;
-    let out = safetensors::tensor::serialize(&tensors, &metadata, None)
+    let config = prepare_crypto(config)?;
+    let out = safetensors::tensor::serialize(&tensors, &metadata, config.as_ref())
         .map_err(|e| SafetensorError::new_err(format!("Error while serializing: {e:?}")))?;
     let pybytes = PyBytes::new(py, &out);
     Ok(pybytes)
@@ -136,19 +156,39 @@ fn serialize<'b>(
 ///         The name of the file to write into.
 ///     metadata (`Dict[str, str]`, *optional*):
 ///         The optional purely text annotations
+///     config (`Dict[str, Any]`, optional):
+///         Encryption configuration, structure as follows:
+///             {
+///                 "tensors": ["tensor1", "tensor2"],  # List of tensor names to encrypt; if None, encrypt all
+///                 "enc_key": {  # Encryption key, supports JWK format
+///                     "alg": "aes256gcm", "kid": "test-enc-key", "key": "..."
+///                 },
+///                 "sign_key": {  # Signing key, supports Ed25519, etc.
+///                     "alg": "ed25519", "kid": "test-sign-key", "private": "...", "public": "..."
+///                 },
+///                 "policy": {  # Optional, load policy
+///                     "local": "...", "remote": "..."
+///                 }
+///             }
 ///
 /// Returns:
 ///     (`NoneType`):
-///         On success return None
+///         Returns None on success.
+///
+/// Usage examples:
+///     1. Full encryption: config["tensors"] is None or omitted, all tensors are encrypted
+///     2. Partial encryption: config["tensors"] specifies some tensor names, others are stored in plaintext
 #[pyfunction]
-#[pyo3(signature = (tensor_dict, filename, metadata=None))]
+#[pyo3(signature = (tensor_dict, filename, metadata=None, config=None))]
 fn serialize_file(
     tensor_dict: HashMap<String, PyBound<PyDict>>,
     filename: PathBuf,
     metadata: Option<HashMap<String, String>>,
+    config: Option<PyBound<PyAny>>,
 ) -> PyResult<()> {
     let tensors = prepare(tensor_dict)?;
-    safetensors::tensor::serialize_to_file(&tensors, &metadata, filename.as_path(), None)
+    let config = prepare_crypto(config)?;
+    safetensors::tensor::serialize_to_file(&tensors, &metadata, filename.as_path(), config.as_ref())
         .map_err(|e| SafetensorError::new_err(format!("Error while serializing: {e:?}")))?;
     Ok(())
 }
@@ -170,13 +210,13 @@ fn prepare_crypto(config: Option<PyBound<PyAny>>) -> PyResult<Option<SerializeCr
     let enc_key_any = config_dict.get_item("enc_key")?
         .ok_or_else(|| SafetensorError::new_err("Missing 'enc_key' in config"))?;
     let enc_key_dict = enc_key_any.downcast::<PyDict>()?;
-    let enc_key = pykeymaterial_from_dict(&enc_key_dict)?;
+    let enc_key = pykeymaterial_from_dict("enc", &enc_key_dict)?;
 
     // sign_key: dict
     let sign_key_any = config_dict.get_item("sign_key")?
         .ok_or_else(|| SafetensorError::new_err("Missing 'sign_key' in config"))?;
     let sign_key_dict = sign_key_any.downcast::<PyDict>()?;
-    let sign_key = pykeymaterial_from_dict(&sign_key_dict)?;
+    let sign_key = pykeymaterial_from_dict("sign",&sign_key_dict)?;
 
     // policy: dict (optional)
     let policy = match config_dict.get_item("policy")? {
@@ -200,17 +240,13 @@ fn prepare_crypto(config: Option<PyBound<PyAny>>) -> PyResult<Option<SerializeCr
     Ok(Some(config))
 }
 
-fn pykeymaterial_from_dict(dict: &PyBound<PyDict>) -> PyResult<KeyMaterial> {
-    let key_type = match dict.get_item("kty")? {
-        Some(v) => v.extract::<String>()?,
-        None => match dict.get_item("key_type")? {
-            Some(v) => v.extract::<String>()?,
-            None => return Err(SafetensorError::new_err("Missing 'kty' or 'key_type' in key dict")),
-        },
+/// Convert a Python dict to KeyMaterial.
+fn pykeymaterial_from_dict(key_type: &str, dict: &PyBound<PyDict>) -> PyResult<KeyMaterial> {
+    // All fields are optional now
+    let alg = match dict.get_item("alg")? {
+        Some(v) => Some(v.extract::<String>()?),
+        None => None,
     };
-    let alg = dict.get_item("alg")?
-        .ok_or_else(|| SafetensorError::new_err("Missing 'alg' in key dict"))?
-        .extract::<String>()?;
     let kid = match dict.get_item("kid")? {
         Some(v) => Some(v.extract::<String>()?),
         None => None,
@@ -219,53 +255,37 @@ fn pykeymaterial_from_dict(dict: &PyBound<PyDict>) -> PyResult<KeyMaterial> {
         Some(v) => Some(v.extract::<String>()?),
         None => None,
     };
-    let k = match dict.get_item("k")? {
-        Some(v) => Some(v.extract::<Vec<u8>>()?),
-        None => None,
+    // k: hex string
+    let k = match dict.get_item("key")? {
+        Some(v) => Some(v.extract::<String>()?),
+        None => match dict.get_item("k")? {
+            Some(v) => Some(v.extract::<String>()?),
+            None => None,
+        },
     };
-    let x_pub = match dict.get_item("x")? {
-        Some(v) => Some(v.extract::<Vec<u8>>()?),
-        None => None,
+    // x_pub: hex string
+    let x_pub = match dict.get_item("public")? {
+        Some(v) => Some(v.extract::<String>()?),
+        None => match dict.get_item("x")? {
+            Some(v) => Some(v.extract::<String>()?),
+            None => None,
+        },
     };
-    let d_priv = match dict.get_item("d")? {
-        Some(v) => Some(v.extract::<Vec<u8>>()?),
-        None => None,
+    // d_priv: hex string
+    let d_priv = match dict.get_item("private")? {
+        Some(v) => Some(v.extract::<String>()?),
+        None => match dict.get_item("d")? {
+            Some(v) => Some(v.extract::<String>()?),
+            None => None,
+        },
     };
-    KeyMaterial::new(key_type, alg, kid, jku, k, x_pub, d_priv)
-        .map_err(|e| SafetensorError::new_err(format!("Failed to build KeyMaterial: {e}")))
-}
-
-/// Serializes raw data as CryptoTensor.
-#[pyfunction]
-#[pyo3(signature = (tensor_dict, metadata=None, config=None))]
-fn serialize_encrypted<'b>(
-    py: Python<'b>,
-    tensor_dict: HashMap<String, PyBound<PyDict>>,
-    metadata: Option<HashMap<String, String>>,
-    config: Option<PyBound<PyAny>>,
-) -> PyResult<PyBound<'b, PyBytes>> {
-    let config = prepare_crypto(config)?;
-    let tensors = prepare(tensor_dict)?;
-    let out = safetensors::tensor::serialize(&tensors, &metadata, config.as_ref())
-        .map_err(|e| SafetensorError::new_err(format!("Encryption serialize failed: {e}")))?;
-    let pybytes = PyBytes::new(py, &out);
-    Ok(pybytes)
-}
-
-/// Serializes raw data as CryptoTensor and writes to file.
-#[pyfunction]
-#[pyo3(signature = (tensor_dict, filename, metadata=None, config=None))]
-fn serialize_file_encrypted(
-    tensor_dict: HashMap<String, PyBound<PyDict>>,
-    filename: PathBuf,
-    metadata: Option<HashMap<String, String>>,
-    config: Option<PyBound<PyAny>>,
-) -> PyResult<()> {
-    let config = prepare_crypto(config)?;
-    let tensors = prepare(tensor_dict)?;
-    safetensors::tensor::serialize_to_file(&tensors, &metadata, filename.as_path(), config.as_ref())
-        .map_err(|e| SafetensorError::new_err(format!("Encryption serialize to file failed: {e}")))?;
-    Ok(())
+    match key_type {
+        "enc" => KeyMaterial::new_enc_key(k, alg, kid, jku)
+            .map_err(|e| SafetensorError::new_err(format!("Failed to build Enc KeyMaterial: {e}"))),
+        "sign" => KeyMaterial::new_sign_key(x_pub, d_priv, alg, kid, jku)
+            .map_err(|e| SafetensorError::new_err(format!("Failed to build Sign KeyMaterial: {e}"))),
+        _ => Err(SafetensorError::new_err("key_type must be 'enc' or 'sign'")),
+    }
 }
 
 /// Opens a safetensors lazily and returns tensors as asked
@@ -1371,8 +1391,6 @@ pyo3::create_exception!(
 fn _safetensors_rust(m: &PyBound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(serialize, m)?)?;
     m.add_function(wrap_pyfunction!(serialize_file, m)?)?;
-    m.add_function(wrap_pyfunction!(serialize_encrypted, m)?)?;
-    m.add_function(wrap_pyfunction!(serialize_file_encrypted, m)?)?;
     m.add_function(wrap_pyfunction!(deserialize, m)?)?;
     m.add_class::<safe_open>()?;
     m.add("SafetensorError", m.py().get_type::<SafetensorError>())?;

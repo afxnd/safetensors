@@ -1,6 +1,6 @@
 import os
 import sys
-from typing import Dict, Optional, Union
+from typing import Dict, Optional, Union, Any
 
 import numpy as np
 
@@ -13,7 +13,8 @@ def _tobytes(tensor: np.ndarray) -> bytes:
     return tensor.tobytes()
 
 
-def save(tensor_dict: Dict[str, np.ndarray], metadata: Optional[Dict[str, str]] = None) -> bytes:
+def save(tensor_dict: Dict[str, np.ndarray], metadata: Optional[Dict[str, str]] = None,
+         config: Optional[Dict[str, Any]] = None) -> bytes:
     """
     Saves a dictionary of tensors into raw bytes in safetensors format.
 
@@ -24,6 +25,20 @@ def save(tensor_dict: Dict[str, np.ndarray], metadata: Optional[Dict[str, str]] 
             Optional text only metadata you might want to save in your header.
             For instance it can be useful to specify more about the underlying
             tensors. This is purely informative and does not affect tensor loading.
+        config (`Dict[str, Any]`, optional):
+            Encryption configuration, structure as follows:
+                {
+                    "tensors": ["tensor1", "tensor2"],  # List of tensor names to encrypt; if None, encrypt all
+                    "enc_key": {  # Encryption key, supports JWK format
+                        "alg": "aes256gcm", "kid": "test-enc-key", "key": "..."
+                    },
+                    "sign_key": {  # Signing key, supports Ed25519, etc.
+                        "alg": "ed25519", "kid": "test-sign-key", "private": "...", "public": "..."
+                    },
+                    "policy": {  # Optional, load policy
+                        "local": "...", "remote": "..."
+                    }
+                }
 
     Returns:
         `bytes`: The raw bytes representing the format
@@ -39,13 +54,13 @@ def save(tensor_dict: Dict[str, np.ndarray], metadata: Optional[Dict[str, str]] 
     ```
     """
     flattened = {k: {"dtype": v.dtype.name, "shape": v.shape, "data": _tobytes(v)} for k, v in tensor_dict.items()}
-    serialized = serialize(flattened, metadata=metadata)
+    serialized = serialize(flattened, metadata=metadata, config=config)
     result = bytes(serialized)
     return result
 
-
 def save_file(
-    tensor_dict: Dict[str, np.ndarray], filename: Union[str, os.PathLike], metadata: Optional[Dict[str, str]] = None
+    tensor_dict: Dict[str, np.ndarray], filename: Union[str, os.PathLike], metadata: Optional[Dict[str, str]] = None,
+    config: Optional[Dict[str, Any]] = None
 ) -> None:
     """
     Saves a dictionary of tensors into raw bytes in safetensors format.
@@ -59,6 +74,20 @@ def save_file(
             Optional text only metadata you might want to save in your header.
             For instance it can be useful to specify more about the underlying
             tensors. This is purely informative and does not affect tensor loading.
+        config (`Dict[str, Any]`, optional):
+            Encryption configuration, structure as follows:
+                {
+                    "tensors": ["tensor1", "tensor2"],  # List of tensor names to encrypt; if None, encrypt all
+                    "enc_key": {  # Encryption key, supports JWK format
+                        "alg": "aes256gcm", "kid": "test-enc-key", "key": "..."
+                    },
+                    "sign_key": {  # Signing key, supports Ed25519, etc.
+                        "alg": "ed25519", "kid": "test-sign-key", "private": "...", "public": "..."
+                    },
+                    "policy": {  # Optional, load policy
+                        "local": "...", "remote": "..."
+                    }
+                }
 
     Returns:
         `None`
@@ -74,12 +103,12 @@ def save_file(
     ```
     """
     flattened = {k: {"dtype": v.dtype.name, "shape": v.shape, "data": _tobytes(v)} for k, v in tensor_dict.items()}
-    serialize_file(flattened, filename, metadata=metadata)
+    serialize_file(flattened, filename, metadata=metadata, config=config)
 
 
 def load(data: bytes) -> Dict[str, np.ndarray]:
     """
-    Loads a safetensors file into numpy format from pure bytes.
+    Loads a safetensors/cryptotensor file into numpy format from pure bytes.
 
     Args:
         data (`bytes`):
@@ -106,7 +135,7 @@ def load(data: bytes) -> Dict[str, np.ndarray]:
 
 def load_file(filename: Union[str, os.PathLike]) -> Dict[str, np.ndarray]:
     """
-    Loads a safetensors file into numpy format.
+    Loads a safetensors/cryptotensor file into numpy format.
 
     Args:
         filename (`str`, or `os.PathLike`)):
@@ -174,74 +203,3 @@ def _is_little_endian(tensor: np.ndarray) -> bool:
     elif byteorder == ">":
         return False
     raise ValueError(f"Unexpected byte order {byteorder}")
-
-
-def save_encrypted(
-    tensor_dict: Dict[str, np.ndarray],
-    metadata: Optional[Dict[str, str]] = None,
-    config: Optional[dict] = None
-) -> bytes:
-    """
-    Saves a dictionary of tensors into encrypted raw bytes in safetensors format.
-
-    Args:
-        tensor_dict (Dict[str, np.ndarray]):
-            The input tensors. Tensors must be contiguous and dense.
-        metadata (Optional[Dict[str, str]], optional):
-            Optional text-only metadata to save in the header.
-        config (Optional[dict], optional):
-            Encryption configuration, must include encryption/signature keys, etc.
-
-    Returns:
-        bytes: The encrypted safetensors format raw bytes.
-
-    Example:
-        >>> from safetensors.numpy import save_encrypted
-        >>> tensors = {"embedding": np.zeros((512, 1024)), "attention": np.zeros((256, 256))}
-        >>> config = {"enc_key": {...}, "sign_key": {...}}
-        >>> byte_data = save_encrypted(tensors, config=config)
-    """
-    from safetensors import serialize_encrypted
-    flattened = {k: {"dtype": v.dtype.name, "shape": v.shape, "data": _tobytes(v)} for k, v in tensor_dict.items()}
-    try:
-        serialized = serialize_encrypted(flattened, metadata=metadata, config=config)
-        result = bytes(serialized)
-        return result
-    except Exception as e:
-        raise RuntimeError(f"Failed to encrypt and serialize tensors: {e}")
-
-
-def save_file_encrypted(
-    tensor_dict: Dict[str, np.ndarray],
-    filename: Union[str, os.PathLike],
-    metadata: Optional[Dict[str, str]] = None,
-    config: Optional[dict] = None
-) -> None:
-    """
-    Saves a dictionary of tensors into an encrypted safetensors file.
-
-    Args:
-        tensor_dict (Dict[str, np.ndarray]):
-            The input tensors. Tensors must be contiguous and dense.
-        filename (str or os.PathLike):
-            The filename to save into.
-        metadata (Optional[Dict[str, str]], optional):
-            Optional text-only metadata to save in the header.
-        config (Optional[dict], optional):
-            Encryption configuration, must include encryption/signature keys, etc.
-
-    Returns:
-        None
-
-    Example:
-        >>> from safetensors.numpy import save_file_encrypted
-        >>> tensors = {"embedding": np.zeros((512, 1024)), "attention": np.zeros((256, 256))}
-        >>> config = {"enc_key": {...}, "sign_key": {...}}
-        >>> save_file_encrypted(tensors, "model.safetensors", config=config)
-    """
-    from safetensors import serialize_file_encrypted
-    flattened = {k: {"dtype": v.dtype.name, "shape": v.shape, "data": _tobytes(v)} for k, v in tensor_dict.items()}
-    try:
-        serialize_file_encrypted(flattened, filename, metadata=metadata, config=config)
-    except Exception as e:
-        raise RuntimeError(f"Failed to encrypt and save tensors to file: {e}")

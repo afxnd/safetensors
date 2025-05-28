@@ -1,5 +1,4 @@
 use crate::tensor::{Metadata, TensorInfo};
-use hex;
 use once_cell::sync::OnceCell;
 use ring::signature::{self, Ed25519KeyPair, UnparsedPublicKey, KeyPair};
 use ring::{aead, rand::{self, SecureRandom}};
@@ -579,13 +578,13 @@ impl KeyMaterial {
     /// * `alg` - Optional algorithm name (default: "aes256gcm")
     /// * `kid` - Optional key ID
     /// * `jku` - Optional JWK URL
-    /// * `key_hex` - Optional hex-encoded key string
+    /// * `key_b64` - Optional base64-encoded key string
     ///
     /// # Returns
     /// * `Ok(KeyMaterial)` - The generated key material
     /// * `Err(CryptoTensorError)` - If input is invalid
     pub fn new_enc_key(
-        key_hex: Option<String>,
+        key_b64: Option<String>,
         alg: Option<String>,
         kid: Option<String>,
         jku: Option<String>,
@@ -593,9 +592,9 @@ impl KeyMaterial {
         let alg = alg.unwrap_or_else(|| "aes256gcm".to_string());
         let enc_alg = EncryptionAlgorithm::from_str(&alg)
             .ok_or_else(|| CryptoTensorError::InvalidAlgorithm(alg.clone()))?;
-        let key_bytes = if let Some(ref hex_str) = key_hex {
-            let bytes = hex::decode(hex_str)
-                .map_err(|e| CryptoTensorError::KeyCreation(format!("Failed to decode hex key: {}", e)))?;
+        let key_bytes = if let Some(ref b64_str) = key_b64 {
+            let bytes = BASE64.decode(b64_str)
+                .map_err(|e| CryptoTensorError::KeyCreation(format!("Failed to decode base64 key: {}", e)))?;
             if bytes.len() != enc_alg.key_len() {
                 return Err(CryptoTensorError::InvalidKeyLength {
                     expected: enc_alg.key_len(),
@@ -628,15 +627,15 @@ impl KeyMaterial {
     /// * `alg` - Optional algorithm name (default: "ed25519")
     /// * `kid` - Optional key ID
     /// * `jku` - Optional JWK URL
-    /// * `public_hex` - Optional hex-encoded public key string
-    /// * `private_hex` - Optional hex-encoded private key string
+    /// * `public_b64` - Optional base64-encoded public key string
+    /// * `private_b64` - Optional base64-encoded private key string
     ///
     /// # Returns
     /// * `Ok(KeyMaterial)` - The generated key material
     /// * `Err(CryptoTensorError)` - If input is invalid
     pub fn new_sign_key(
-        public_hex: Option<String>,
-        private_hex: Option<String>,
+        public_b64: Option<String>,
+        private_b64: Option<String>,
         alg: Option<String>,
         kid: Option<String>,
         jku: Option<String>,
@@ -646,9 +645,9 @@ impl KeyMaterial {
             .ok_or_else(|| CryptoTensorError::InvalidAlgorithm(alg.clone()))?;
         match sig_alg {
             SignatureAlgorithm::Ed25519 => {
-                let public = if let Some(pub_hex) = public_hex {
-                    let pub_bytes = hex::decode(&pub_hex)
-                        .map_err(|e| CryptoTensorError::KeyCreation(format!("Failed to decode hex public key: {}", e)))?;
+                let public = if let Some(pub_b64) = public_b64 {
+                    let pub_bytes = BASE64.decode(&pub_b64)
+                        .map_err(|e| CryptoTensorError::KeyCreation(format!("Failed to decode base64 public key: {}", e)))?;
                     if pub_bytes.len() != 32 {
                         return Err(CryptoTensorError::InvalidKeyLength {
                             expected: 32,
@@ -657,22 +656,30 @@ impl KeyMaterial {
                     }
                     Some(pub_bytes)
                 } else { None };
-                let private = if let Some(priv_hex) = private_hex {
-                    let priv_bytes = hex::decode(&priv_hex)
-                        .map_err(|e| CryptoTensorError::KeyCreation(format!("Failed to decode hex private key: {}", e)))?;
-                    // Try to parse as PKCS8
-                    let _ = Ed25519KeyPair::from_pkcs8(&priv_bytes)
-                        .map_err(|e| CryptoTensorError::KeyCreation(format!("Invalid Ed25519 PKCS8 private key: {}", e)))?;
+                let private = if let Some(priv_b64) = private_b64 {
+                    let priv_bytes = BASE64.decode(&priv_b64)
+                        .map_err(|e| CryptoTensorError::KeyCreation(format!("Failed to decode base64 private key: {}", e)))?;
+                    if priv_bytes.len() != 32 {
+                        return Err(CryptoTensorError::InvalidKeyLength {
+                            expected: 32,
+                            got: priv_bytes.len(),
+                        });
+                    }
                     Some(priv_bytes)
                 } else { None };
                 // If both are None, generate new key pair
                 let (public, private) = if public.is_none() && private.is_none() {
                     let rng = rand::SystemRandom::new();
-                    let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng)
+                    let mut private_key = [0u8; 32];
+                    rng.fill(&mut private_key).map_err(|e| CryptoTensorError::RandomGeneration(e.to_string()))?;
+                    let key_pair = Ed25519KeyPair::from_seed_unchecked(&private_key)
                         .map_err(|e| CryptoTensorError::KeyCreation(e.to_string()))?;
-                    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref())
+                    (Some(key_pair.public_key().as_ref().to_vec()), Some(private_key.to_vec()))
+                } else if !public.is_none() && !private.is_none() {
+                    // Try to verify the key pair
+                    Ed25519KeyPair::from_seed_and_public_key(private.clone().unwrap().as_slice(), public.clone().unwrap().as_slice() )
                         .map_err(|e| CryptoTensorError::KeyCreation(e.to_string()))?;
-                    (Some(key_pair.public_key().as_ref().to_vec()), Some(pkcs8_bytes.as_ref().to_vec()))
+                    (public, private)
                 } else {
                     (public, private)
                 };
@@ -1064,7 +1071,7 @@ fn sign_data(data: &[u8], key: &[u8], algo_name: &str) -> Result<Vec<u8>, Crypto
     match algo {
         SignatureAlgorithm::Ed25519 => {
             // Create Ed25519 key pair from private key
-            let key_pair = Ed25519KeyPair::from_pkcs8(key).map_err(|e| {
+            let key_pair = Ed25519KeyPair::from_seed_unchecked(key).map_err(|e| {
                 CryptoTensorError::Signing(format!("Failed to create Ed25519 key pair: {}", e))
             })?;
 
@@ -1121,16 +1128,16 @@ pub struct TensorCryptor<'data> {
     /// Algorithm used for encryption
     #[serde(skip)]
     enc_algo: String,
-    /// Encrypted tensor key
-    wrapped_key: Vec<u8>,
-    /// Initialization vector for key encryption
-    key_iv: Vec<u8>,
-    /// Authentication tag for key encryption
-    key_tag: Vec<u8>,
-    /// Initialization vector for data encryption
-    iv: Vec<u8>,
-    /// Authentication tag for data encryption
-    tag: Vec<u8>,
+    /// Encrypted tensor key encoded in base64
+    wrapped_key: String,
+    /// Initialization vector for key encryption encoded in base64
+    key_iv: String,
+    /// Authentication tag for key encryption encoded in base64
+    key_tag: String,
+    /// Initialization vector for data encryption encoded in base64
+    iv: String,
+    /// Authentication tag for data encryption encoded in base64
+    tag: String,
     /// Buffer for decrypted data
     #[serde(skip)]
     buffer: OnceCell<Vec<u8>>,
@@ -1160,11 +1167,11 @@ impl<'data> TensorCryptor<'data> {
                     .map_err(|e| CryptoTensorError::KeyCreation(format!("Failed to decode base64 key: {}", e)))?;
                 Ok(Self {
                     enc_algo: alg.to_string(),
-                    wrapped_key: Vec::new(),
-                    key_iv: Vec::new(),
-                    key_tag: Vec::new(),
-                    iv: Vec::new(),
-                    tag: Vec::new(),
+                    wrapped_key: String::new(),
+                    key_iv: String::new(),
+                    key_tag: String::new(),
+                    iv: String::new(),
+                    tag: String::new(),
                     buffer: OnceCell::new(),
                     master_key: Arc::from(decoded_key),
                     _phantom: std::marker::PhantomData,
@@ -1217,9 +1224,9 @@ impl<'data> TensorCryptor<'data> {
         let mut key_buf = key.to_vec();
         let (key_iv, key_tag) =
             encrypt_data(&mut key_buf, &self.master_key, &self.enc_algo)?;
-        self.wrapped_key = key_buf;
-        self.key_iv = key_iv;
-        self.key_tag = key_tag;
+        self.wrapped_key = BASE64.encode(&key_buf);
+        self.key_iv = BASE64.encode(&key_iv);
+        self.key_tag = BASE64.encode(&key_tag);
         Ok(())
     }
 
@@ -1240,13 +1247,17 @@ impl<'data> TensorCryptor<'data> {
             return Err(CryptoTensorError::MissingMasterKey);
         }
 
-        let mut data_key = self.wrapped_key.clone();
+        let mut data_key = BASE64.decode(&self.wrapped_key)
+            .map_err(|e| CryptoTensorError::KeyUnwrap {
+                tensor: "".to_string(),
+                source: e.to_string(),
+            })?;
         decrypt_data(
             &mut data_key,
             &self.master_key,
             &self.enc_algo,
-            &self.key_iv,
-            &self.key_tag,
+            BASE64.decode(&self.key_iv).map_err(|e| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: e.to_string() })?.as_slice(),
+            BASE64.decode(&self.key_tag).map_err(|e| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: e.to_string() })?.as_slice(),
         )?;
         Ok(data_key)
     }
@@ -1276,8 +1287,8 @@ impl<'data> TensorCryptor<'data> {
                     &mut buffer,
                     data_key.as_slice(),
                     &self.enc_algo,
-                    &self.iv,
-                    &self.tag,
+                    BASE64.decode(&self.iv).map_err(|e| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: e.to_string() })?.as_slice(),
+                    BASE64.decode(&self.tag).map_err(|e| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: e.to_string() })?.as_slice(),
                 )?;
 
                 Ok(buffer)
@@ -1307,8 +1318,8 @@ impl<'data> TensorCryptor<'data> {
         // Copy data to buffer, prepare in-place encryption
         let mut buffer = data.to_vec();
         let (iv, tag) = encrypt_data(&mut buffer, &data_key, &self.enc_algo)?;
-        self.iv = iv;
-        self.tag = tag;
+        self.iv = BASE64.encode(&iv);
+        self.tag = BASE64.encode(&tag);
         self.wrap_key(&data_key)?;
         self.buffer.set(buffer).ok();
         Ok(())
@@ -1579,7 +1590,7 @@ impl<'data> CryptoTensor<'data> {
         self.signer.sign(&header_json.as_bytes())?;
         let signature = self.signer.signature.get()
             .ok_or_else(|| CryptoTensorError::Signing("Failed to get signature".to_string()))?;
-        new_metadata.insert("__signature__".to_string(), hex::encode(signature));
+        new_metadata.insert("__signature__".to_string(), BASE64.encode(signature));
 
         Ok(Some(new_metadata))
     }
@@ -1633,7 +1644,7 @@ impl<'data> CryptoTensor<'data> {
 
         // Create signer and verify signature
         let signer = HeaderSigner::new(&sign_key)?;
-        let signature = hex::decode(signature_hex)
+        let signature = BASE64.decode(signature_hex)
             .map_err(|_| CryptoTensorError::InvalidSignatureFormat)?;
         signer.signature.set(signature)
             .expect("Failed to set signature");
@@ -1768,7 +1779,7 @@ mod tests {
     fn test_tensor_cryptor_empty_data() -> Result<(), CryptoTensorError> {
         let master_key = vec![1u8; 32];
         let key_material = KeyMaterial::new_enc_key(
-            Some(hex::encode(master_key)),
+            Some(BASE64.encode(master_key)),
             Some("aes256gcm".to_string()),
             None,
             None,
@@ -1796,7 +1807,7 @@ mod tests {
     fn test_tensor_cryptor_non_empty_data() -> Result<(), CryptoTensorError> {
         let master_key = vec![1u8; 32];
         let key_material = KeyMaterial::new_enc_key(
-            Some(hex::encode(master_key)),
+            Some(BASE64.encode(master_key)),
             Some("aes256gcm".to_string()),
             None,
             None,
@@ -1824,7 +1835,7 @@ mod tests {
     fn test_tensor_cryptor_large_data() -> Result<(), CryptoTensorError> {
         let master_key = vec![1u8; 32];
         let key_material = KeyMaterial::new_enc_key(
-            Some(hex::encode(master_key)),
+            Some(BASE64.encode(master_key)),
             Some("aes256gcm".to_string()),
             None,
             None,
@@ -1860,7 +1871,7 @@ mod tests {
         for (key_algo, key_len) in algorithms.iter() {
             let master_key = vec![1u8; *key_len];
             let key_material = KeyMaterial::new_enc_key(
-                Some(hex::encode(master_key)),
+                Some(BASE64.encode(master_key)),
                 Some(key_algo.to_string()),
                 None,
                 None,
@@ -1888,16 +1899,16 @@ mod tests {
     fn test_header_signer_sign_and_verify() -> Result<(), CryptoTensorError> {
         // Generate Ed25519 key pair
         let rng = SystemRandom::new();
-        let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng)
-            .map_err(|e| CryptoTensorError::KeyCreation(e.to_string()))?;
-        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref())
+        let mut private_key = [0u8; 32];
+        rng.fill(&mut private_key).map_err(|e| CryptoTensorError::RandomGeneration(e.to_string()))?;
+        let key_pair = Ed25519KeyPair::from_seed_unchecked(&private_key)
             .map_err(|e| CryptoTensorError::KeyCreation(e.to_string()))?;
         let public_key = key_pair.public_key().as_ref().to_vec();
 
         // Create key material
         let key_material = KeyMaterial::new_sign_key(
-            Some(hex::encode(public_key)),
-            Some(hex::encode(pkcs8_bytes.as_ref().to_vec())),
+            Some(BASE64.encode(public_key)),
+            Some(BASE64.encode(private_key)),
             Some("ed25519".to_string()),
             None,
             None,
@@ -1937,15 +1948,15 @@ mod tests {
     fn test_header_signer_error_handling() -> Result<(), CryptoTensorError> {
         // Generate Ed25519 key pair
         let rng = SystemRandom::new();
-        let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng)
-            .map_err(|e| CryptoTensorError::KeyCreation(e.to_string()))?;
-        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref())
+        let mut private_key = [0u8; 32];
+        rng.fill(&mut private_key).map_err(|e| CryptoTensorError::RandomGeneration(e.to_string()))?;
+        let key_pair = Ed25519KeyPair::from_seed_unchecked(&private_key)
             .map_err(|e| CryptoTensorError::KeyCreation(e.to_string()))?;
         let public_key = key_pair.public_key().as_ref().to_vec();
 
         // Test missing private key
         let key_material = KeyMaterial::new_sign_key(
-            Some(hex::encode(public_key)),
+            Some(BASE64.encode(public_key)),
             None, // No private key
             Some("ed25519".to_string()),
             None,
@@ -1964,7 +1975,7 @@ mod tests {
         // Test missing public key
         let key_material = KeyMaterial::new_sign_key(
             None,
-            Some(hex::encode(pkcs8_bytes.as_ref().to_vec())),
+            Some(BASE64.encode(&private_key)),
             Some("ed25519".to_string()),
             None,
             None,
@@ -2367,7 +2378,7 @@ mod tests {
 
         // Create test key material for encryption
         let enc_key = KeyMaterial::new_enc_key(
-            Some(hex::encode(vec![1u8; 32])),
+            Some(BASE64.encode(vec![1u8; 32])),
             Some("aes256gcm".to_string()),
             Some("test-enc-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),
@@ -2375,16 +2386,16 @@ mod tests {
 
         // Generate Ed25519 key pair for signing
         let rng = SystemRandom::new();
-        let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng)
-            .map_err(|e| CryptoTensorError::KeyCreation(e.to_string()))?;
-        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes.as_ref())
+        let mut private_key = [0u8; 32];
+        rng.fill(&mut private_key).map_err(|e| CryptoTensorError::RandomGeneration(e.to_string()))?;
+        let key_pair = Ed25519KeyPair::from_seed_unchecked(&private_key)
             .map_err(|e| CryptoTensorError::KeyCreation(e.to_string()))?;
         let public_key = key_pair.public_key().as_ref().to_vec();
 
         // Create test key material for signing
         let sign_key = KeyMaterial::new_sign_key(
-            Some(hex::encode(public_key.clone())),
-            Some(hex::encode(pkcs8_bytes.as_ref().to_vec())),
+            Some(BASE64.encode(public_key.clone())),
+            Some(BASE64.encode(&private_key)),
             Some("ed25519".to_string()),
             Some("test-sign-key".to_string()),
             Some(format!("file://{}", test_file.to_str().unwrap())),

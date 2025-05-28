@@ -6,6 +6,4 @@ from ._safetensors_rust import (  # noqa: F401
     safe_open,
     serialize,
     serialize_file,
-    serialize_encrypted,
-    serialize_file_encrypted,
 )

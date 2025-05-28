@@ -132,6 +132,7 @@ def save_model(
     filename: str,
     metadata: Optional[Dict[str, str]] = None,
     force_contiguous: bool = True,
+    config: Optional[Dict[str, Any]] = None,
 ):
     """
     Saves a given torch model to specified filename.
@@ -153,6 +154,20 @@ def save_model(
             This has no effect on the correctness of the model, but it
             could potentially change performance if the layout of the tensor
             was chosen specifically for that reason.
+        config (`Dict[str, Any]`, optional):
+            Encryption configuration, structure as follows:
+                {
+                    "tensors": ["tensor1", "tensor2"],  # List of tensor names to encrypt; if None, encrypt all
+                    "enc_key": {  # Encryption key, supports JWK format
+                        "alg": "aes256gcm", "kid": "test-enc-key", "key": "..."
+                    },
+                    "sign_key": {  # Signing key, supports Ed25519, etc.
+                        "alg": "ed25519", "kid": "test-sign-key", "private": "...", "public": "..."
+                    },
+                    "policy": {  # Optional, load policy
+                        "local": "...", "remote": "..."
+                    }
+                }
     """
     state_dict = model.state_dict()
     to_removes = _remove_duplicate_names(state_dict)
@@ -169,7 +184,7 @@ def save_model(
     if force_contiguous:
         state_dict = {k: v.contiguous() for k, v in state_dict.items()}
     try:
-        save_file(state_dict, filename, metadata=metadata)
+        save_file(state_dict, filename, metadata=metadata, config=config)
     except ValueError as e:
         msg = str(e)
         msg += " Or use save_model(..., force_contiguous=True), read the docs for potential caveats."
@@ -273,7 +288,7 @@ def load_model(
     return missing, unexpected
 
 
-def save(tensors: Dict[str, torch.Tensor], metadata: Optional[Dict[str, str]] = None) -> bytes:
+def save(tensors: Dict[str, torch.Tensor], metadata: Optional[Dict[str, str]] = None, config: Optional[Dict[str, Any]] = None) -> bytes:
     """
     Saves a dictionary of tensors into raw bytes in safetensors format.
 
@@ -284,6 +299,20 @@ def save(tensors: Dict[str, torch.Tensor], metadata: Optional[Dict[str, str]] = 
             Optional text only metadata you might want to save in your header.
             For instance it can be useful to specify more about the underlying
             tensors. This is purely informative and does not affect tensor loading.
+        config (`Dict[str, Any]`, optional):
+            Encryption configuration, structure as follows:
+                {
+                    "tensors": ["tensor1", "tensor2"],  # List of tensor names to encrypt; if None, encrypt all
+                    "enc_key": {  # Encryption key, supports JWK format
+                        "alg": "aes256gcm", "kid": "test-enc-key", "key": "..."
+                    },
+                    "sign_key": {  # Signing key, supports Ed25519, etc.
+                        "alg": "ed25519", "kid": "test-sign-key", "private": "...", "public": "..."
+                    },
+                    "policy": {  # Optional, load policy
+                        "local": "...", "remote": "..."
+                    }
+                }
 
     Returns:
         `bytes`: The raw bytes representing the format
@@ -298,7 +327,7 @@ def save(tensors: Dict[str, torch.Tensor], metadata: Optional[Dict[str, str]] = 
     byte_data = save(tensors)
     ```
     """
-    serialized = serialize(_flatten(tensors), metadata=metadata)
+    serialized = serialize(_flatten(tensors), metadata=metadata, config=config)
     result = bytes(serialized)
     return result
 
@@ -307,6 +336,7 @@ def save_file(
     tensors: Dict[str, torch.Tensor],
     filename: Union[str, os.PathLike],
     metadata: Optional[Dict[str, str]] = None,
+    config: Optional[Dict[str, Any]] = None,
 ):
     """
     Saves a dictionary of tensors into raw bytes in safetensors format.
@@ -320,6 +350,20 @@ def save_file(
             Optional text only metadata you might want to save in your header.
             For instance it can be useful to specify more about the underlying
             tensors. This is purely informative and does not affect tensor loading.
+        config (`Dict[str, Any]`, optional):
+            Encryption configuration, structure as follows:
+                {
+                    "tensors": ["tensor1", "tensor2"],  # List of tensor names to encrypt; if None, encrypt all
+                    "enc_key": {  # Encryption key, supports JWK format
+                        "alg": "aes256gcm", "kid": "test-enc-key", "key": "..."
+                    },
+                    "sign_key": {  # Signing key, supports Ed25519, etc.
+                        "alg": "ed25519", "kid": "test-sign-key", "private": "...", "public": "..."
+                    },
+                    "policy": {  # Optional, load policy
+                        "local": "...", "remote": "..."
+                    }
+                }
 
     Returns:
         `None`
@@ -334,7 +378,7 @@ def save_file(
     save_file(tensors, "model.safetensors")
     ```
     """
-    serialize_file(_flatten(tensors), filename, metadata=metadata)
+    serialize_file(_flatten(tensors), filename, metadata=metadata, config=config)
 
 
 def load_file(filename: Union[str, os.PathLike], device: Union[str, int] = "cpu") -> Dict[str, torch.Tensor]:
@@ -552,76 +596,3 @@ def _flatten(tensors: Dict[str, torch.Tensor]) -> Dict[str, Dict[str, Any]]:
         }
         for k, v in tensors.items()
     }
-
-
-def save_encrypted(
-    tensors: Dict[str, torch.Tensor],
-    metadata: Optional[Dict[str, str]] = None,
-    config: Optional[dict] = None
-) -> bytes:
-    """
-    Saves a dictionary of tensors into encrypted raw bytes in safetensors format.
-
-    Args:
-        tensors (Dict[str, torch.Tensor]):
-            The input tensors. Tensors must be contiguous and dense.
-        metadata (Optional[Dict[str, str]], optional):
-            Optional text-only metadata to save in the header.
-        config (Optional[dict], optional):
-            Encryption configuration, must include encryption/signature keys, etc.
-
-    Returns:
-        bytes: The encrypted safetensors format raw bytes.
-
-    Example:
-        >>> from safetensors.torch import save_encrypted
-        >>> import torch
-        >>> tensors = {"embedding": torch.zeros((512, 1024)), "attention": torch.zeros((256, 256))}
-        >>> config = {"enc_key": {...}, "sign_key": {...}}
-        >>> byte_data = save_encrypted(tensors, config=config)
-    """
-    from safetensors import serialize_encrypted
-    flattened = _flatten(tensors)
-    try:
-        serialized = serialize_encrypted(flattened, metadata=metadata, config=config)
-        result = bytes(serialized)
-        return result
-    except Exception as e:
-        raise RuntimeError(f"Failed to encrypt and serialize tensors: {e}")
-
-
-def save_file_encrypted(
-    tensors: Dict[str, torch.Tensor],
-    filename: Union[str, os.PathLike],
-    metadata: Optional[Dict[str, str]] = None,
-    config: Optional[dict] = None
-) -> None:
-    """
-    Saves a dictionary of tensors into an encrypted safetensors file.
-
-    Args:
-        tensors (Dict[str, torch.Tensor]):
-            The input tensors. Tensors must be contiguous and dense.
-        filename (str or os.PathLike):
-            The filename to save into.
-        metadata (Optional[Dict[str, str]], optional):
-            Optional text-only metadata to save in the header.
-        config (Optional[dict], optional):
-            Encryption configuration, must include encryption/signature keys, etc.
-
-    Returns:
-        None
-
-    Example:
-        >>> from safetensors.torch import save_file_encrypted
-        >>> import torch
-        >>> tensors = {"embedding": torch.zeros((512, 1024)), "attention": torch.zeros((256, 256))}
-        >>> config = {"enc_key": {...}, "sign_key": {...}}
-        >>> save_file_encrypted(tensors, "model.safetensors", config=config)
-    """
-    from safetensors import serialize_file_encrypted
-    flattened = _flatten(tensors)
-    try:
-        serialize_file_encrypted(flattened, filename, metadata=metadata, config=config)
-    except Exception as e:
-        raise RuntimeError(f"Failed to encrypt and save tensors to file: {e}")
