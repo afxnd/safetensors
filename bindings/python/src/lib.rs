@@ -738,7 +738,8 @@ impl Open {
                         .call1((slice,))?;
 
                     let array: PyObject = if let Some(crypto) = &self.crypto {
-                        let py_bytes: PyBound<PyBytes> = storage_slice.extract()?;
+                        let builtins = PyModule::import(py, intern!(py, "builtins"))?;
+                        let py_bytes: PyBound<PyBytes> = builtins.getattr("bytes")?.call1((storage_slice.call_method0("tolist")?,))?.extract()?;
                         let decrypted = crypto.silent_decrypt(name, py_bytes.as_bytes())
                             .map_err(|e| SafetensorError::new_err(format!("Decryption failed: {e:?}")))?;
                         PyByteArray::new(py, &decrypted).into_any().into()
@@ -1134,7 +1135,8 @@ impl PySafeSlice {
                 let slices = slices.into_pyobject(py)?;
                 // If the tensor is encrypted, decrypt it
                 let array: PyObject = if let Some(crypto) = &self.tensor_crypto {
-                    let py_bytes: PyBound<PyBytes> = storage_slice.extract()?;
+                    let builtins = PyModule::import(py, intern!(py, "builtins"))?;
+                    let py_bytes: PyBound<PyBytes> = builtins.getattr("bytes")?.call1((storage_slice.call_method0("tolist")?,))?.extract()?;
                     let decrypted = crypto.decrypt(py_bytes.as_bytes())
                         .map_err(|e| SafetensorError::new_err(format!("Decryption failed: {e:?}")))?;
                     PyByteArray::new(py, &decrypted).into_any().into()
