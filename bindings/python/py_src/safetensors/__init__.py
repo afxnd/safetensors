@@ -1,9 +1,6 @@
-# Re-export this
-from ._safetensors_rust import (  # noqa: F401
-    SafetensorError,
-    __version__,
-    deserialize,
-    safe_open,
-    serialize,
-    serialize_file,
-)
+from cryptotensors import *
+
+try:
+    from cryptotensors import __version__, __all__
+except ImportError:
+    pass
