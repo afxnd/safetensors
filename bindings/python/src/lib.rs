@@ -739,12 +739,16 @@ impl Open {
 
                     let array: PyObject = if self.crypto.as_ref().and_then(|c| c.get(name)).is_some() {
                         let crypto = self.crypto.as_ref().unwrap();
-                        let builtins = PyModule::import(py, intern!(py, "builtins"))?;
-                        // TODO: Optimize this memory copy
-                        let py_bytes: PyBound<PyBytes> = builtins.getattr("bytes")?.call1((storage_slice.call_method0("tolist")?,))?.extract()?;
-                        let decrypted = crypto.silent_decrypt(name, py_bytes.as_bytes())
-                            .map_err(|e| SafetensorError::new_err(format!("Decryption failed: {e:?}")))?;
-                        PyByteArray::new(py, &decrypted).into_any().into()
+                        if let Some(decrypted) = crypto.get_buffer(name) {
+                            PyByteArray::new(py, decrypted).into_any().into()
+                        } else {
+                            let builtins = PyModule::import(py, intern!(py, "builtins"))?;
+                            // TODO: Optimize this memory copy
+                            let py_bytes: PyBound<PyBytes> = builtins.getattr("bytes")?.call1((storage_slice.call_method0("tolist")?,))?.extract()?;
+                            let decrypted = crypto.silent_decrypt(name, py_bytes.as_bytes())
+                                .map_err(|e| SafetensorError::new_err(format!("Decryption failed: {e:?}")))?;
+                            PyByteArray::new(py, &decrypted).into_any().into()
+                        }
                     } else {
                         storage_slice.into()
                     };

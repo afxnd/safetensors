@@ -269,7 +269,7 @@ pub fn serialize<
     buffer.extend(&header_bytes);
     for (name, tensor) in tensor_names.iter().zip(tensors) {
         // Get the encrypted data for the tensor if it is encrypted
-        let encrypted_data = crypto.as_ref().and_then(|c| c.get_encrypted_data(name));
+        let encrypted_data = crypto.as_ref().and_then(|c| c.get_buffer(name));
         match encrypted_data {
             Some(encrypted_data) => buffer.extend(encrypted_data),
             None => buffer.extend(tensor.data().as_ref()),
@@ -305,7 +305,7 @@ pub fn serialize_to_file<
     f.write_all(&header_bytes)?;
     for (name, tensor) in tensor_names.iter().zip(tensors) {
         // Get the encrypted data for the tensor if it is encrypted
-        let encrypted_data = crypto.as_ref().and_then(|c| c.get_encrypted_data(name));
+        let encrypted_data = crypto.as_ref().and_then(|c| c.get_buffer(name));
         match encrypted_data {
             Some(encrypted_data) => f.write_all(encrypted_data)?,
             None => f.write_all(tensor.data().as_ref())?,

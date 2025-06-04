@@ -1755,7 +1755,7 @@ impl<'data> CryptoTensor<'data> {
     ///
     /// * `Some(&[u8])` - The encrypted data if available
     /// * `None` - If no encrypted data is available
-    pub fn get_encrypted_data(&self, tensor_name: &str) -> Option<&[u8]> {
+    pub fn get_buffer(&self, tensor_name: &str) -> Option<&[u8]> {
         match self.get(tensor_name) {
             Some(cryptor) => cryptor.buffer.get().map(|buf| buf.as_slice()),
             None => None,
@@ -2435,7 +2435,7 @@ mod tests {
         crypto_tensor.silent_encrypt("tensor1", tensor1_data)?;
 
         // Get encrypted data
-        let encrypted_tensor1 = crypto_tensor.get_encrypted_data("tensor1").unwrap();
+        let encrypted_tensor1 = crypto_tensor.get_buffer("tensor1").unwrap();
 
         // Create tensor info
         let tensors = vec![
