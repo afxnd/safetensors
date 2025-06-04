@@ -3,7 +3,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 pub mod slice;
 pub mod tensor;
-/// Crypto module for CryptoTensor
+/// Crypto module for CryptoTensors
 pub mod crypto;
 /// serialize_to_file only valid in std
 #[cfg(feature = "std")]

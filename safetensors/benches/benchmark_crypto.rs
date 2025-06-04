@@ -33,7 +33,7 @@ fn bench_encryption_performance(c: &mut Criterion) {
         // ("100%", 5), // Encrypt all tensors
     ];
 
-    let mut group = c.benchmark_group("Serialize 10_MB CryptoTensor");
+    let mut group = c.benchmark_group("Serialize 10_MB CryptoTensors");
     group.measurement_time(std::time::Duration::from_secs(30));
     group.plot_config(criterion::PlotConfiguration::default()
         .summary_scale(criterion::AxisScale::Logarithmic));
@@ -122,7 +122,7 @@ fn bench_decryption_performance(c: &mut Criterion) {
         ("ChaCha20-Poly1305", "chacha20poly1305"),
     ];
 
-    let mut group = c.benchmark_group("Deserialize 10_MB CryptoTensor");
+    let mut group = c.benchmark_group("Deserialize 10_MB CryptoTensors");
     group.measurement_time(std::time::Duration::from_secs(30));
     group.plot_config(criterion::PlotConfiguration::default()
         .summary_scale(criterion::AxisScale::Logarithmic));

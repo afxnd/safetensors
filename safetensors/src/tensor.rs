@@ -1,7 +1,7 @@
 //! Module Containing the most important structures
 use crate::lib::{Cow, HashMap, BTreeMap, String, ToString, Vec};
 use crate::slice::{InvalidSlice, SliceIterator, TensorIndexer};
-use crate::crypto::{CryptoTensor, SerializeCryptoConfig};
+use crate::crypto::{CryptoTensors, SerializeCryptoConfig};
 use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(feature = "std")]
 use std::io::Write;
@@ -182,7 +182,7 @@ fn prepare<'data, S: AsRef<str> + Ord + core::fmt::Display, V: View + 'data, I: 
     data_info: &Option<HashMap<String, String>>,
     crypto_config: Option<&SerializeCryptoConfig>,
     // ) -> Result<(Metadata, Vec<&'hash TensorView<'data>>, usize), SafeTensorError> {
-) -> Result<(PreparedData, Vec<V>, Option<CryptoTensor<'data>>, Vec<String>), SafeTensorError> {
+) -> Result<(PreparedData, Vec<V>, Option<CryptoTensors<'data>>, Vec<String>), SafeTensorError> {
     // Make sure we're sorting by descending dtype alignment
     // Then by name
     let mut data: Vec<_> = data.into_iter().collect();
@@ -197,7 +197,7 @@ fn prepare<'data, S: AsRef<str> + Ord + core::fmt::Display, V: View + 'data, I: 
     // Generate the crypto manager
     let tensor_names: Vec<String> = data.iter().map(|(name, _)| name.to_string()).collect();
     let mut crypto = if let Some(config) = crypto_config {
-        CryptoTensor::from_serialize_config(tensor_names.clone(), config).unwrap()
+        CryptoTensors::from_serialize_config(tensor_names.clone(), config).unwrap()
     } else {
         None
     };
@@ -321,7 +321,7 @@ pub fn serialize_to_file<
 pub struct SafeTensors<'data> {
     metadata: Metadata,
     data: &'data [u8],
-    crypto: Option<CryptoTensor<'data>>,
+    crypto: Option<CryptoTensors<'data>>,
 }
 
 impl<'data> SafeTensors<'data> {
@@ -394,7 +394,7 @@ impl<'data> SafeTensors<'data> {
     {
         let (n, metadata) = SafeTensors::read_metadata(buffer)?;
         let data = &buffer[n + 8..];
-        let crypto = CryptoTensor::from_header(&metadata)?;
+        let crypto = CryptoTensors::from_header(&metadata)?;
         Ok(Self { metadata, data, crypto })
     }
 
@@ -1160,7 +1160,7 @@ mod tests {
         assert_eq!(tensor.data(), b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
     }
 
-    /// This test is disabled because for CryptoTensor, the TensorView is not bound to the original data
+    /// This test is disabled because for CryptoTensors, the TensorView is not bound to the original data
     /// but is bound to the SafeTensors instance. So the test would fail to compile.
     // #[test]
     // fn test_lifetimes() {

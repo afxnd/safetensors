@@ -751,7 +751,7 @@ impl KeyMaterial {
 
 /// Configuration for serializing tensors with encryption
 pub struct SerializeCryptoConfig {
-    /// CryptoTensor version
+    /// CryptoTensors version
     version: String,
     /// The names of the tensors to encrypt
     tensors: Option<Vec<String>>,
@@ -1124,7 +1124,7 @@ fn verify_signature(
 
 /// Information about encrypted tensor data and methods for encryption/decryption
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TensorCryptor<'data> {
+pub struct SingleCryptor<'data> {
     /// Algorithm used for encryption
     #[serde(skip)]
     enc_algo: String,
@@ -1149,8 +1149,8 @@ pub struct TensorCryptor<'data> {
     _phantom: std::marker::PhantomData<&'data ()>,
 }
 
-impl<'data> TensorCryptor<'data> {
-    /// Create a new TensorCryptor from key material
+impl<'data> SingleCryptor<'data> {
+    /// Create a new SingleCryptor from key material
     ///
     /// # Arguments
     ///
@@ -1277,7 +1277,7 @@ impl<'data> TensorCryptor<'data> {
     ///
     /// * `KeyUnwrap` - If key unwrapping fails
     /// * `Decryption` - If data decryption fails
-    pub fn decrypt(&'data self, data: &[u8]) -> Result<&'data [u8], CryptoTensorError> {
+    fn decrypt(&'data self, data: &[u8]) -> Result<&'data [u8], CryptoTensorError> {
         self.buffer
             .get_or_try_init(|| {
                 let data_key = Zeroizing::new(self.unwrap_key()?);
@@ -1454,9 +1454,9 @@ impl LoadPolicy {
 
 /// Manager for handling encryption and decryption of multiple tensors
 #[derive(Debug)]
-pub struct CryptoTensor<'data> {
+pub struct CryptoTensors<'data> {
     /// Mapping from tensor names to their encryptors
-    cryptors: HashMap<String, TensorCryptor<'data>>,
+    cryptors: HashMap<String, SingleCryptor<'data>>,
     /// Signer for signing/verifying the file header
     signer: HeaderSigner,
     /// Key material for encryption/decryption
@@ -1465,18 +1465,18 @@ pub struct CryptoTensor<'data> {
     sign_key: KeyMaterial,
     /// Policy for model loading and KMS validation
     policy: LoadPolicy,
-    /// CryptoTensor version
+    /// CryptoTensors version
     version: String,
 }
 
-impl<'data> CryptoTensor<'data> {
+impl<'data> CryptoTensors<'data> {
     /// Get the encryptor for a specific tensor
-    pub fn get(&self, tensor_name: &str) -> Option<&TensorCryptor<'data>> {
+    pub fn get(&self, tensor_name: &str) -> Option<&SingleCryptor<'data>> {
         self.cryptors.get(tensor_name)
     }
 
     /// Get a mutable reference to the encryptor for a specific tensor
-    fn get_mut(&mut self, tensor_name: &str) -> Option<&mut TensorCryptor<'data>> {
+    fn get_mut(&mut self, tensor_name: &str) -> Option<&mut SingleCryptor<'data>> {
         self.cryptors.get_mut(tensor_name)
     }
 
@@ -1489,7 +1489,7 @@ impl<'data> CryptoTensor<'data> {
     ///
     /// # Returns
     ///
-    /// A new CryptoTensor instance. If no configuration is provided or no tensors
+    /// A new CryptoTensors instance. If no configuration is provided or no tensors
     /// are selected for encryption, the manager will be initialized without any
     /// encryptors.
     pub fn from_serialize_config(
@@ -1522,10 +1522,10 @@ impl<'data> CryptoTensor<'data> {
         let cryptors = matched_tensors
             .iter()
             .map(|name| {
-                let cryptor = TensorCryptor::new(&config.enc_key)?;
+                let cryptor = SingleCryptor::new(&config.enc_key)?;
                 Ok((name.clone(), cryptor))
             })
-            .collect::<Result<HashMap<String, TensorCryptor<'data>>, CryptoTensorError>>()?;
+            .collect::<Result<HashMap<String, SingleCryptor<'data>>, CryptoTensorError>>()?;
 
         // Create signer
         let signer = HeaderSigner::new(&config.sign_key)?;
@@ -1603,7 +1603,7 @@ impl<'data> CryptoTensor<'data> {
     ///
     /// # Returns
     ///
-    /// * `Ok(CryptoTensor)` - If valid encryption metadata was found and verified
+    /// * `Ok(CryptoTensors)` - If valid encryption metadata was found and verified
     /// * `Err(CryptoTensorError)` - If verification fails or metadata is invalid
     pub fn from_header(header: &Metadata) -> Result<Option<Self>, CryptoTensorError> {
         // return None if the header does not contain metadata or metadata does not contain encryption info
@@ -1674,7 +1674,7 @@ impl<'data> CryptoTensor<'data> {
             return Err(CryptoTensorError::MissingMasterKey);
         };
 
-        let mut cryptors: HashMap<String, TensorCryptor<'data>> = serde_json::from_str(encryption_info)
+        let mut cryptors: HashMap<String, SingleCryptor<'data>> = serde_json::from_str(encryption_info)
         .map_err(|e| CryptoTensorError::Encryption(e.to_string()))?;
         for cryptor in cryptors.values_mut() {
             cryptor.master_key = master_key.clone();
@@ -1785,13 +1785,13 @@ mod tests {
             None,
         )?;
 
-        let mut encryptor = TensorCryptor::new(&key_material)?;
+        let mut encryptor = SingleCryptor::new(&key_material)?;
         let empty_data = b"";
         assert!(encryptor.encrypt(empty_data).is_ok());
         let encrypted_empty = encryptor.buffer.get().unwrap();
         assert!(encrypted_empty.is_empty()); // Should be empty encrypted data
 
-        let mut decryptor = TensorCryptor::new(&key_material)?;
+        let mut decryptor = SingleCryptor::new(&key_material)?;
         decryptor.wrapped_key = encryptor.wrapped_key.clone();
         decryptor.key_iv = encryptor.key_iv.clone();
         decryptor.key_tag = encryptor.key_tag.clone();
@@ -1813,13 +1813,13 @@ mod tests {
             None,
         )?;
 
-        let mut encryptor = TensorCryptor::new(&key_material)?;
+        let mut encryptor = SingleCryptor::new(&key_material)?;
         let test_data = b"Hello";
         assert!(encryptor.encrypt(test_data).is_ok());
         let encrypted_data = encryptor.buffer.get().unwrap();
         assert_ne!(encrypted_data, test_data);
 
-        let mut decryptor = TensorCryptor::new(&key_material)?;
+        let mut decryptor = SingleCryptor::new(&key_material)?;
         decryptor.wrapped_key = encryptor.wrapped_key.clone();
         decryptor.key_iv = encryptor.key_iv.clone();
         decryptor.key_tag = encryptor.key_tag.clone();
@@ -1841,13 +1841,13 @@ mod tests {
             None,
         )?;
 
-        let mut encryptor = TensorCryptor::new(&key_material)?;
+        let mut encryptor = SingleCryptor::new(&key_material)?;
         let large_data = vec![1u8; 1024];
         assert!(encryptor.encrypt(&large_data).is_ok());
         let encrypted_data = encryptor.buffer.get().unwrap();
         assert_ne!(encrypted_data, &large_data);
 
-        let mut decryptor = TensorCryptor::new(&key_material)?;
+        let mut decryptor = SingleCryptor::new(&key_material)?;
         decryptor.wrapped_key = encryptor.wrapped_key.clone();
         decryptor.key_iv = encryptor.key_iv.clone();
         decryptor.key_tag = encryptor.key_tag.clone();
@@ -1877,12 +1877,12 @@ mod tests {
                 None,
             )?;
 
-            let mut encryptor = TensorCryptor::new(&key_material)?;
+            let mut encryptor = SingleCryptor::new(&key_material)?;
             assert!(encryptor.encrypt(test_data).is_ok());
             let encrypted_data = encryptor.buffer.get().unwrap();
             assert_ne!(encrypted_data, test_data);
 
-            let mut decryptor = TensorCryptor::new(&key_material)?;
+            let mut decryptor = SingleCryptor::new(&key_material)?;
             decryptor.wrapped_key = encryptor.wrapped_key.clone();
             decryptor.key_iv = encryptor.key_iv.clone();
             decryptor.key_tag = encryptor.key_tag.clone();
@@ -2369,7 +2369,7 @@ mod tests {
         println!("=== End of {} ===\n", title);
     }
 
-    /// Test the complete flow of CryptoTensor
+    /// Test the complete flow of CryptoTensors
     #[test]
     fn test_crypto_tensor_complete_flow() -> Result<(), CryptoTensorError> {
         // Create temporary directory for test files
@@ -2422,8 +2422,8 @@ mod tests {
             dummy_policy,
         )?;
 
-        // Initialize CryptoTensor from serialization config
-        let mut crypto_tensor = CryptoTensor::from_serialize_config(
+        // Initialize CryptoTensors from serialization config
+        let mut crypto_tensor = CryptoTensors::from_serialize_config(
             vec!["tensor1".to_string()],
             &config,
         )?.unwrap();
@@ -2461,8 +2461,8 @@ mod tests {
         let header_json = serde_json::to_value(&header).unwrap();
         print_formatted_json("Complete Header", &header_json);
 
-        // Create new CryptoTensor from header
-        let new_crypto_tensor = CryptoTensor::from_header(&header)?.unwrap();
+        // Create new CryptoTensors from header
+        let new_crypto_tensor = CryptoTensors::from_header(&header)?.unwrap();
 
         // Verify encrypted data can be decrypted
         let decrypted_tensor1 = new_crypto_tensor.silent_decrypt("tensor1", encrypted_tensor1)?;

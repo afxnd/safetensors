@@ -18,7 +18,7 @@ use std::ops::Bound;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use safetensors::crypto::{SerializeCryptoConfig, KeyMaterial, LoadPolicy, CryptoTensor, TensorCryptor};
+use safetensors::crypto::{SerializeCryptoConfig, KeyMaterial, LoadPolicy, CryptoTensors};
 
 static TORCH_MODULE: OnceLock<Py<PyModule>> = OnceLock::new();
 static NUMPY_MODULE: OnceLock<Py<PyModule>> = OnceLock::new();
@@ -530,7 +530,7 @@ struct Open {
     device: Device,
     storage: Arc<Storage>,
     raw_mmap: Option<Arc<Storage>>, // Storage for direct access to the data
-    crypto: Option<CryptoTensor<'static>>,
+    crypto: Option<Arc<CryptoTensors<'static>>>,
 }
 
 impl Open {
@@ -556,10 +556,10 @@ impl Open {
 
         let offset = n + 8;
 
-        // Always call CryptoTensor::from_header to detect encryption
-        // If the file is encrypted, this returns Some(CryptoTensor), otherwise None
-        let crypto = safetensors::crypto::CryptoTensor::from_header(&metadata)
-            .map_err(|e| SafetensorError::new_err(format!("Error parsing CryptoTensor: {e:?}")))?;
+        // If the file is encrypted, this returns Some(CryptoTensors), otherwise None
+        let crypto = safetensors::crypto::CryptoTensors::from_header(&metadata)
+            .map_err(|e| SafetensorError::new_err(format!("Error parsing CryptoTensors: {e:?}")))?
+            .map(Arc::new);
 
         Python::with_gil(|py| -> PyResult<()> {
             match framework {
@@ -836,13 +836,14 @@ impl Open {
     pub fn get_slice(&self, name: &str) -> PyResult<PySafeSlice> {
         if let Some(&info) = self.metadata.tensors().get(name) {
             Ok(PySafeSlice {
+                name: name.to_string(),
                 info: info.clone(),
                 framework: self.framework.clone(),
                 offset: self.offset,
                 device: self.device.clone(),
                 storage: self.storage.clone(),
                 raw_mmap: self.raw_mmap.clone(),
-                tensor_crypto: self.crypto.as_ref().and_then(|c| c.get(name).cloned()),
+                crypto: self.crypto.clone(),
             })
         } else {
             Err(SafetensorError::new_err(format!(
@@ -972,13 +973,14 @@ impl safe_open {
 
 #[pyclass]
 struct PySafeSlice {
+    name: String,
     info: TensorInfo,
     framework: Framework,
     offset: usize,
     device: Device,
     storage: Arc<Storage>,
     raw_mmap: Option<Arc<Storage>>,
-    tensor_crypto: Option<TensorCryptor<'static>>,
+    crypto: Option<Arc<CryptoTensors<'static>>>,
 }
 
 #[derive(FromPyObject)]
@@ -1079,8 +1081,8 @@ impl PySafeSlice {
                 let data = &mmap[self.info.data_offsets.0 + self.offset
                     ..self.info.data_offsets.1 + self.offset];
                 // If the tensor is encrypted, decrypt it
-                let data = if let Some(crypto) = &self.tensor_crypto {
-                    crypto.decrypt(data)
+                let data = if let Some(crypto) = &self.crypto {
+                    crypto.silent_decrypt(&self.name, data)
                         .map_err(|e| SafetensorError::new_err(format!("Decryption failed: {e:?}")))?
                 } else {
                     data
@@ -1154,20 +1156,24 @@ impl PySafeSlice {
                     .call1((slice,))?;
 
                 let slices = slices.into_pyobject(py)?;
-                // If the tensor is encrypted, decrypt it
-                let array: PyObject = if let Some(crypto) = &self.tensor_crypto {
-                    let data = if let Some(raw_mmap) = &self.raw_mmap {
-                        if let Storage::Mmap(mmap) = raw_mmap.as_ref() {
-                            &mmap[self.info.data_offsets.0 + self.offset..self.info.data_offsets.1 + self.offset]
-                        } else {
-                            return Err(SafetensorError::new_err("raw_mmap is not Mmap"));
-                        }
+                let array: PyObject = if self.crypto.as_ref().and_then(|c| c.get(&self.name)).is_some() {
+                    let crypto = self.crypto.as_ref().unwrap();
+                    if let Some(decrypted) = crypto.get_buffer(&self.name) {
+                        PyByteArray::new(py, decrypted).into_any().into()
                     } else {
-                        return Err(SafetensorError::new_err("raw_mmap is None"));
-                    };
-                    let decrypted = crypto.decrypt(data)
-                        .map_err(|e| SafetensorError::new_err(format!("Decryption failed: {e:?}")))?;
-                    PyByteArray::new(py, &decrypted).into_any().into()
+                        let data = if let Some(raw_mmap) = &self.raw_mmap {
+                            if let Storage::Mmap(mmap) = raw_mmap.as_ref() {
+                                &mmap[self.info.data_offsets.0 + self.offset..self.info.data_offsets.1 + self.offset]
+                            } else {
+                                return Err(SafetensorError::new_err("raw_mmap is not Mmap"));
+                            }
+                        } else {
+                            return Err(SafetensorError::new_err("raw_mmap is None"));
+                        };
+                        let decrypted = crypto.silent_decrypt(&self.name, data)
+                            .map_err(|e| SafetensorError::new_err(format!("Decryption failed: {e:?}")))?;
+                        PyByteArray::new(py, &decrypted).into_any().into()
+                    }
                 } else {
                     storage_slice.into()
                 };
