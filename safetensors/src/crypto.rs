@@ -2,7 +2,7 @@ use crate::tensor::{Metadata, TensorInfo};
 use once_cell::sync::OnceCell;
 use ring::signature::{self, Ed25519KeyPair, UnparsedPublicKey, KeyPair};
 use ring::{aead, rand::{self, SecureRandom}};
-use serde::{Deserialize, Serialize, de::Error, Deserializer};
+use serde::{Deserialize, Serialize, de::Error, Deserializer, Serializer};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -278,9 +278,8 @@ enum JwkKeyType {
 }
 
 /// Serialize and deserialize OnceCell<Option<String>>
-mod once_cell_option {
+mod key_material_serde {
     use super::*;
-    use once_cell::sync::OnceCell;
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<OnceCell<Option<String>>, D::Error>
     where
@@ -290,6 +289,33 @@ mod once_cell_option {
         let cell = OnceCell::new();
         if let Some(v) = value {
             cell.set(Some(v)).map_err(|_| D::Error::custom("Failed to set OnceCell value"))?;
+        }
+        Ok(cell)
+    }
+}
+
+/// Serialize and deserialize OnceCell<String>
+mod cryptor_serde {
+    use super::*;
+
+    pub fn serialize<S>(cell: &OnceCell<String>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match cell.get() {
+            Some(value) => value.serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<OnceCell<String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value: Option<String> = Option::deserialize(deserializer)?;
+        let cell = OnceCell::new();
+        if let Some(v) = value {
+            cell.set(v).map_err(|_| D::Error::custom("Failed to set OnceCell value"))?;
         }
         Ok(cell)
     }
@@ -308,18 +334,18 @@ pub struct KeyMaterial {
     
     /// The master key encoded in base64 for encryption
     #[serde(skip_serializing, default)]
-    #[serde(with = "once_cell_option")]
+    #[serde(with = "key_material_serde")]
     pub k: OnceCell<Option<String>>,
 
     /// The public key encoded in base64 for signing
     #[serde(skip_serializing, default)]
-    #[serde(with = "once_cell_option")]
+    #[serde(with = "key_material_serde")]
     #[serde(rename = "x")]
     pub x_pub: OnceCell<Option<String>>,
 
     /// The private key encoded in base64 for signing
     #[serde(skip_serializing, default)]
-    #[serde(with = "once_cell_option")]
+    #[serde(with = "key_material_serde")]
     #[serde(rename = "d")]
     pub d_priv: OnceCell<Option<String>>,
 
@@ -1129,15 +1155,20 @@ pub struct SingleCryptor<'data> {
     #[serde(skip)]
     enc_algo: String,
     /// Encrypted tensor key encoded in base64
-    wrapped_key: String,
+    #[serde(with = "cryptor_serde")]
+    wrapped_key: OnceCell<String>,
     /// Initialization vector for key encryption encoded in base64
-    key_iv: String,
+    #[serde(with = "cryptor_serde")]
+    key_iv: OnceCell<String>,
     /// Authentication tag for key encryption encoded in base64
-    key_tag: String,
+    #[serde(with = "cryptor_serde")]
+    key_tag: OnceCell<String>,
     /// Initialization vector for data encryption encoded in base64
-    iv: String,
+    #[serde(with = "cryptor_serde")]
+    iv: OnceCell<String>,
     /// Authentication tag for data encryption encoded in base64
-    tag: String,
+    #[serde(with = "cryptor_serde")]
+    tag: OnceCell<String>,
     /// Buffer for decrypted data
     #[serde(skip)]
     buffer: OnceCell<Vec<u8>>,
@@ -1167,11 +1198,11 @@ impl<'data> SingleCryptor<'data> {
                     .map_err(|e| CryptoTensorError::KeyCreation(format!("Failed to decode base64 key: {}", e)))?;
                 Ok(Self {
                     enc_algo: alg.to_string(),
-                    wrapped_key: String::new(),
-                    key_iv: String::new(),
-                    key_tag: String::new(),
-                    iv: String::new(),
-                    tag: String::new(),
+                    wrapped_key: OnceCell::new(),
+                    key_iv: OnceCell::new(),
+                    key_tag: OnceCell::new(),
+                    iv: OnceCell::new(),
+                    tag: OnceCell::new(),
                     buffer: OnceCell::new(),
                     master_key: Arc::from(decoded_key),
                     _phantom: std::marker::PhantomData,
@@ -1220,13 +1251,16 @@ impl<'data> SingleCryptor<'data> {
     /// # Errors
     ///
     /// * `Encryption` - If key encryption fails
-    fn wrap_key(&mut self, key: &[u8]) -> Result<(), CryptoTensorError> {
+    fn wrap_key(&self, key: &[u8]) -> Result<(), CryptoTensorError> {
         let mut key_buf = key.to_vec();
         let (key_iv, key_tag) =
             encrypt_data(&mut key_buf, &self.master_key, &self.enc_algo)?;
-        self.wrapped_key = BASE64.encode(&key_buf);
-        self.key_iv = BASE64.encode(&key_iv);
-        self.key_tag = BASE64.encode(&key_tag);
+        self.wrapped_key.set(BASE64.encode(&key_buf))
+            .map_err(|_| CryptoTensorError::Encryption("Failed to set wrapped key".to_string()))?;
+        self.key_iv.set(BASE64.encode(&key_iv))
+            .map_err(|_| CryptoTensorError::Encryption("Failed to set key iv".to_string()))?;
+        self.key_tag.set(BASE64.encode(&key_tag))
+            .map_err(|_| CryptoTensorError::Encryption("Failed to set key tag".to_string()))?;
         Ok(())
     }
 
@@ -1247,17 +1281,16 @@ impl<'data> SingleCryptor<'data> {
             return Err(CryptoTensorError::MissingMasterKey);
         }
 
-        let mut data_key = BASE64.decode(&self.wrapped_key)
-            .map_err(|e| CryptoTensorError::KeyUnwrap {
-                tensor: "".to_string(),
-                source: e.to_string(),
-            })?;
+        let mut data_key = BASE64.decode(&self.wrapped_key.get().ok_or_else(|| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: "wrapped_key is empty".to_string() })?)
+            .map_err(|e| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: e.to_string() })?;
         decrypt_data(
             &mut data_key,
             &self.master_key,
             &self.enc_algo,
-            BASE64.decode(&self.key_iv).map_err(|e| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: e.to_string() })?.as_slice(),
-            BASE64.decode(&self.key_tag).map_err(|e| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: e.to_string() })?.as_slice(),
+            BASE64.decode(&self.key_iv.get().ok_or_else(|| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: "key_iv is empty".to_string() })?)
+                .map_err(|e| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: e.to_string() })?.as_slice(),
+            BASE64.decode(&self.key_tag.get().ok_or_else(|| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: "key_tag is empty".to_string() })?)
+                .map_err(|e| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: e.to_string() })?.as_slice(),
         )?;
         Ok(data_key)
     }
@@ -1287,8 +1320,10 @@ impl<'data> SingleCryptor<'data> {
                     &mut buffer,
                     data_key.as_slice(),
                     &self.enc_algo,
-                    BASE64.decode(&self.iv).map_err(|e| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: e.to_string() })?.as_slice(),
-                    BASE64.decode(&self.tag).map_err(|e| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: e.to_string() })?.as_slice(),
+                    BASE64.decode(&self.iv.get().ok_or_else(|| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: "iv is empty".to_string() })?)
+                        .map_err(|e| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: e.to_string() })?.as_slice(),
+                    BASE64.decode(&self.tag.get().ok_or_else(|| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: "tag is empty".to_string() })?)
+                        .map_err(|e| CryptoTensorError::KeyUnwrap { tensor: "".to_string(), source: e.to_string() })?.as_slice(),
                 )?;
 
                 Ok(buffer)
@@ -1312,16 +1347,19 @@ impl<'data> SingleCryptor<'data> {
     /// * `RandomGeneration` - If key generation fails
     /// * `Encryption` - If data encryption fails
     /// * `KeyCreation` - If key creation fails
-    fn encrypt(&mut self, data: &[u8]) -> Result<(), CryptoTensorError> {
+    fn encrypt(&self, data: &[u8]) -> Result<(), CryptoTensorError> {
         // Generate random data encryption key
         let data_key = Zeroizing::new(self.random_key()?);
         // Copy data to buffer, prepare in-place encryption
         let mut buffer = data.to_vec();
         let (iv, tag) = encrypt_data(&mut buffer, &data_key, &self.enc_algo)?;
-        self.iv = BASE64.encode(&iv);
-        self.tag = BASE64.encode(&tag);
+        self.iv.set(BASE64.encode(&iv))
+            .map_err(|_| CryptoTensorError::Encryption("Failed to set iv".to_string()))?;
+        self.tag.set(BASE64.encode(&tag))
+            .map_err(|_| CryptoTensorError::Encryption("Failed to set tag".to_string()))?;
         self.wrap_key(&data_key)?;
-        self.buffer.set(buffer).ok();
+        self.buffer.set(buffer)
+            .map_err(|_| CryptoTensorError::Encryption("Failed to set buffer".to_string()))?;
         Ok(())
     }
 }
@@ -1475,9 +1513,9 @@ impl<'data> CryptoTensors<'data> {
         self.cryptors.get(tensor_name)
     }
 
-    /// Get a mutable reference to the encryptor for a specific tensor
-    fn get_mut(&mut self, tensor_name: &str) -> Option<&mut SingleCryptor<'data>> {
-        self.cryptors.get_mut(tensor_name)
+    /// Return bool if the tensor should be encrypted
+    pub fn should_encrypt(&self, tensor_name: String) -> bool {
+        self.cryptors.contains_key(&tensor_name)
     }
 
     /// Create a new encryptor mapping from encryption configuration
@@ -1735,11 +1773,11 @@ impl<'data> CryptoTensors<'data> {
     /// * `Encryption` - If data encryption fails
     /// * `KeyCreation` - If key creation fails
     pub fn silent_encrypt(
-        &mut self,
+        &self,
         tensor_name: &str,
         data: &[u8],
     ) -> Result<(), CryptoTensorError> {
-        match self.get_mut(tensor_name) {
+        match self.get(tensor_name) {
             Some(cryptor) => cryptor.encrypt(data),
             None => Ok(()),
         }
@@ -1785,7 +1823,7 @@ mod tests {
             None,
         )?;
 
-        let mut encryptor = SingleCryptor::new(&key_material)?;
+        let encryptor = SingleCryptor::new(&key_material)?;
         let empty_data = b"";
         assert!(encryptor.encrypt(empty_data).is_ok());
         let encrypted_empty = encryptor.buffer.get().unwrap();
@@ -1813,7 +1851,7 @@ mod tests {
             None,
         )?;
 
-        let mut encryptor = SingleCryptor::new(&key_material)?;
+        let encryptor = SingleCryptor::new(&key_material)?;
         let test_data = b"Hello";
         assert!(encryptor.encrypt(test_data).is_ok());
         let encrypted_data = encryptor.buffer.get().unwrap();
@@ -1841,7 +1879,7 @@ mod tests {
             None,
         )?;
 
-        let mut encryptor = SingleCryptor::new(&key_material)?;
+        let encryptor = SingleCryptor::new(&key_material)?;
         let large_data = vec![1u8; 1024];
         assert!(encryptor.encrypt(&large_data).is_ok());
         let encrypted_data = encryptor.buffer.get().unwrap();
@@ -1877,7 +1915,7 @@ mod tests {
                 None,
             )?;
 
-            let mut encryptor = SingleCryptor::new(&key_material)?;
+            let encryptor = SingleCryptor::new(&key_material)?;
             assert!(encryptor.encrypt(test_data).is_ok());
             let encrypted_data = encryptor.buffer.get().unwrap();
             assert_ne!(encrypted_data, test_data);
@@ -2423,7 +2461,7 @@ mod tests {
         )?;
 
         // Initialize CryptoTensors from serialization config
-        let mut crypto_tensor = CryptoTensors::from_serialize_config(
+        let crypto_tensor = CryptoTensors::from_serialize_config(
             vec!["tensor1".to_string()],
             &config,
         )?.unwrap();
