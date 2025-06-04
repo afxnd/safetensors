@@ -8,3 +8,8 @@ bindings/python/Cargo.lock
 *.pdparams
 *.safetensors
 *.npz
+*.DS_Store
+
+# cursor
+.cursor
+memory-bank
