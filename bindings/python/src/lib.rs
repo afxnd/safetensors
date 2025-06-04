@@ -529,6 +529,7 @@ struct Open {
     framework: Framework,
     device: Device,
     storage: Arc<Storage>,
+    raw_mmap: Option<Arc<Storage>>, // Storage for direct access to the data
     crypto: Option<CryptoTensor<'static>>,
 }
 
@@ -575,8 +576,8 @@ impl Open {
             Ok(())
         })?;
 
-        let storage = match &framework {
-            Framework::Pytorch => Python::with_gil(|py| -> PyResult<Storage> {
+        let (storage, raw_mmap) = match &framework {
+            Framework::Pytorch => Python::with_gil(|py| -> PyResult<(Storage, Option<Arc<Storage>>)> {
                 let module = get_module(py, &TORCH_MODULE)?;
 
                 let version: String = module.getattr(intern!(py, "__version__"))?.extract()?;
@@ -617,12 +618,17 @@ impl Open {
                     let gil_storage = OnceLock::new();
                     gil_storage.get_or_init_py_attached(py, || storage);
 
-                    Ok(Storage::TorchStorage(gil_storage))
+                    let raw_mmap = match crypto {
+                        Some(_) => Some(Arc::new(Storage::Mmap(buffer))),
+                        None => None,
+                    };
+
+                    Ok((Storage::TorchStorage(gil_storage), raw_mmap))
                 } else {
-                    Ok(Storage::Mmap(buffer))
+                    Ok((Storage::Mmap(buffer), None))
                 }
             })?,
-            _ => Storage::Mmap(buffer),
+            _ => (Storage::Mmap(buffer), None),
         };
 
         let storage = Arc::new(storage);
@@ -633,6 +639,7 @@ impl Open {
             framework,
             device,
             storage,
+            raw_mmap,
             crypto,
         })
     }
@@ -742,10 +749,16 @@ impl Open {
                         if let Some(decrypted) = crypto.get_buffer(name) {
                             PyByteArray::new(py, decrypted).into_any().into()
                         } else {
-                            let builtins = PyModule::import(py, intern!(py, "builtins"))?;
-                            // TODO: Optimize this memory copy
-                            let py_bytes: PyBound<PyBytes> = builtins.getattr("bytes")?.call1((storage_slice.call_method0("tolist")?,))?.extract()?;
-                            let decrypted = crypto.silent_decrypt(name, py_bytes.as_bytes())
+                            let data = if let Some(raw_mmap) = &self.raw_mmap {
+                                if let Storage::Mmap(mmap) = raw_mmap.as_ref() {
+                                    &mmap[info.data_offsets.0 + self.offset..info.data_offsets.1 + self.offset]
+                                } else {
+                                    return Err(SafetensorError::new_err("raw_mmap is not Mmap"));
+                                }
+                            } else {
+                                return Err(SafetensorError::new_err("raw_mmap is None"));
+                            };
+                            let decrypted = crypto.silent_decrypt(name, data)
                                 .map_err(|e| SafetensorError::new_err(format!("Decryption failed: {e:?}")))?;
                             PyByteArray::new(py, &decrypted).into_any().into()
                         }
@@ -828,6 +841,7 @@ impl Open {
                 offset: self.offset,
                 device: self.device.clone(),
                 storage: self.storage.clone(),
+                raw_mmap: self.raw_mmap.clone(),
                 tensor_crypto: self.crypto.as_ref().and_then(|c| c.get(name).cloned()),
             })
         } else {
@@ -963,6 +977,7 @@ struct PySafeSlice {
     offset: usize,
     device: Device,
     storage: Arc<Storage>,
+    raw_mmap: Option<Arc<Storage>>,
     tensor_crypto: Option<TensorCryptor<'static>>,
 }
 
@@ -1141,9 +1156,16 @@ impl PySafeSlice {
                 let slices = slices.into_pyobject(py)?;
                 // If the tensor is encrypted, decrypt it
                 let array: PyObject = if let Some(crypto) = &self.tensor_crypto {
-                    let builtins = PyModule::import(py, intern!(py, "builtins"))?;
-                    let py_bytes: PyBound<PyBytes> = builtins.getattr("bytes")?.call1((storage_slice.call_method0("tolist")?,))?.extract()?;
-                    let decrypted = crypto.decrypt(py_bytes.as_bytes())
+                    let data = if let Some(raw_mmap) = &self.raw_mmap {
+                        if let Storage::Mmap(mmap) = raw_mmap.as_ref() {
+                            &mmap[self.info.data_offsets.0 + self.offset..self.info.data_offsets.1 + self.offset]
+                        } else {
+                            return Err(SafetensorError::new_err("raw_mmap is not Mmap"));
+                        }
+                    } else {
+                        return Err(SafetensorError::new_err("raw_mmap is None"));
+                    };
+                    let decrypted = crypto.decrypt(data)
                         .map_err(|e| SafetensorError::new_err(format!("Decryption failed: {e:?}")))?;
                     PyByteArray::new(py, &decrypted).into_any().into()
                 } else {
