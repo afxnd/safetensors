@@ -49,13 +49,13 @@ Run `write_jwk.py`. This will generate a `key.jwk` file in current work director
 # Generate Key
 python write_jwk.py
 ```
-Convert the model to cryptotensors. Run `transformers/convert_model.py` to encrypt several tensors in the model. You can set the value of `num_of_encrypted_tensors` to specify the number of encrypted tensors.
+Convert the model to cryptotensors. Run `convert_model.py` to encrypt several tensors in the model. You can set the value of `num_of_encrypted_tensors` to specify the number of encrypted tensors.
 ```bash
 # copy the folder 
 cp -r ./Qwen/Qwen3-0.6B ./Qwen/Qwen3-0.6B-Enc
 
 # convert
-python transformers/convert_model.py
+python convert_model.py
 
 # print the model's metadata
 python print_metadata.py ./Qwen/Qwen3-0.6B-Enc/model.safetensors
