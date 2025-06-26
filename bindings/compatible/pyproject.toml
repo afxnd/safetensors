@@ -1,8 +1,8 @@
 [project]
-name = 'safetensors'
+name = 'cryptotensors-safetensors'
 requires-python = '>=3.9'
 description = 'A safetensors adapter layer for cryptotensors, to avoid package requirements errors.'
-version = '0.5.3'
+version = '0.6.0-dev.0'
 authors = [
     {name = 'Nicolas Patry', email = 'patry.nicolas@protonmail.com'}
 ]

@@ -100,7 +100,8 @@ impl Display for SafeTensorError {
             }
             MetadataIncompleteBuffer => write!(f, "incomplete metadata, file not fully covered"),
             ValidationOverflow => write!(f, "overflow computing buffer size from shape and/or element type"),
-            MisalignedSlice => write!(f, "The slice is slicing for subbytes dtypes, and the slice does not end up at a byte boundary, this is invalid.")
+            MisalignedSlice => write!(f, "The slice is slicing for subbytes dtypes, and the slice does not end up at a byte boundary, this is invalid."),
+            CryptoTensorError(error) => write!(f, "CryptoTensorError: {error}"),
         }
     }
 }
@@ -251,7 +252,7 @@ where
     let data: Vec<_> = data.into_iter().collect();
     // Generate the crypto manager
     let tensor_names: Vec<String> = data.iter().map(|(name, _)| name.to_string()).collect();
-    let mut crypto = if let Some(config) = crypto_config {
+    let mut crypto = if let Some(config) = config {
         CryptoTensors::from_serialize_config(tensor_names.clone(), config).unwrap()
     } else {
         None
@@ -451,7 +452,7 @@ impl<'data> SafeTensors<'data> {
     ///         .tensor("test")
     ///         .unwrap();
     /// ```
-    pub fn deserialize<'data>(buffer: &'data [u8]) -> Result<Self, SafeTensorError> {
+    pub fn deserialize(buffer: &'data [u8]) -> Result<Self, SafeTensorError> {
         let (n, metadata) = SafeTensors::read_metadata(buffer)?;
         let data = &buffer[N_LEN + n..];
         let crypto = CryptoTensors::from_header(&metadata)?;
@@ -496,14 +497,14 @@ impl<'data> SafeTensors<'data> {
                 }
                 None => &self.data[info.data_offsets.0..info.data_offsets.1],
             };
-            Ok(
+            Ok((
                 name.as_str(),
                 TensorView {
                     dtype: info.dtype,
                     shape: info.shape.clone(),
                     data,
                 },
-            )
+            ))
         })
     }
 
@@ -564,7 +565,8 @@ impl<'data> SafeTensors<'data> {
 /// indexing into the raw byte-buffer array and how to interpret it.
 #[derive(Debug, Clone)]
 pub struct Metadata {
-    metadata: Option<HashMap<String, String>>,
+    /// The metadata of the file
+    pub metadata: Option<HashMap<String, String>>,
     tensors: Vec<TensorInfo>,
     index_map: HashMap<String, usize>,
 }
@@ -620,7 +622,7 @@ impl Serialize for Metadata {
 
         if let Some(metadata) = &self.metadata {
             let sorted_metadata: BTreeMap<_, _> = metadata.iter().collect();
-            map.serialize_entry("__metadata__", sorted_metadata)?;
+            map.serialize_entry("__metadata__", &sorted_metadata)?;
         }
 
         for (name, info) in names.iter().zip(&self.tensors) {
@@ -1070,7 +1072,7 @@ mod tests {
         fn test_roundtrip(metadata in arbitrary_metadata()) {
             let data: Vec<u8> = (0..data_size(&metadata)).map(|x| x as u8).collect();
             let before = SafeTensors { metadata, data: &data, crypto: None };
-            let tensors = before.tensors();
+            let tensors = before.tensors().unwrap();
             let bytes = serialize(tensors.iter().map(|(name, view)| (name.to_string(), view)), None, None).unwrap();
 
             let after = SafeTensors::deserialize(&bytes).unwrap();
@@ -1119,7 +1121,7 @@ mod tests {
         let metadata: HashMap<String, TensorView> =
             [("attn.0".to_string(), attn_0)].into_iter().collect();
 
-        let out = serialize(&metadata, None).unwrap();
+        let out = serialize(&metadata, None, None).unwrap();
         assert_eq!(
             out,
             [
@@ -1130,7 +1132,7 @@ mod tests {
             ]
         );
         let parsed = SafeTensors::deserialize(&out).unwrap();
-        let tensors: HashMap<_, _> = parsed.tensors().into_iter().collect();
+        let tensors: HashMap<_, _> = parsed.tensors().unwrap().into_iter().collect();
         assert_eq!(tensors, metadata);
     }
 
@@ -1630,7 +1632,7 @@ mod tests {
         ).unwrap();
 
         // Serialize and encrypt
-        let out = serialize(&metadata, &None, Some(&serialize_config)).unwrap();
+        let out = serialize(&metadata, None, Some(&serialize_config)).unwrap();
         
         // Deserialize and verify
         let parsed = SafeTensors::deserialize(&out).unwrap();
@@ -1716,7 +1718,7 @@ mod tests {
         ).unwrap();
 
         // Serialize and encrypt
-        let out = serialize(&metadata, &None, Some(&serialize_config)).unwrap();
+        let out = serialize(&metadata, None, Some(&serialize_config)).unwrap();
         
         // Deserialize and verify
         let parsed = SafeTensors::deserialize(&out).unwrap();
@@ -1799,7 +1801,7 @@ mod tests {
         ).unwrap();
 
         // Serialize and encrypt
-        let out = serialize(&metadata, &None, Some(&serialize_config)).unwrap();
+        let out = serialize(&metadata, None, Some(&serialize_config)).unwrap();
         
         // Deserialize and verify metadata
         let parsed = SafeTensors::deserialize(&out).unwrap();
@@ -1876,7 +1878,7 @@ mod tests {
         ).unwrap();
 
         // Serialize and encrypt
-        let out = serialize(&metadata, &None, Some(&serialize_config)).unwrap();
+        let out = serialize(&metadata, None, Some(&serialize_config)).unwrap();
         
         // Deserialize and set decryption key
         let parsed = SafeTensors::deserialize(&out).unwrap();

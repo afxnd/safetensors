@@ -101,7 +101,7 @@ fn bench_encryption_performance(c: &mut Criterion) {
 
             group.bench_with_input(benchmark_id, &metadata, |b, metadata| {
                 b.iter(|| {
-                    let _serialized = serialize(black_box(metadata), black_box(&None), Some(&crypto_config));
+                    let _serialized = serialize(black_box(metadata), black_box(None), Some(&crypto_config));
                 })
             });
         }
@@ -177,7 +177,7 @@ fn bench_decryption_performance(c: &mut Criterion) {
             dummy_policy,
         ).unwrap();
 
-        let serialized = serialize(&metadata, &None, Some(&crypto_config)).unwrap();
+        let serialized = serialize(&metadata, None, Some(&crypto_config)).unwrap();
 
         group.bench_with_input(
             BenchmarkId::new("decryption", algo_name),

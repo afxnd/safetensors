@@ -2479,7 +2479,7 @@ mod tests {
         let tensors = vec![
             ("tensor1".to_string(), TensorInfo {
                 dtype: Dtype::U8,
-                shape: vec![1],
+                shape: vec![encrypted_tensor1.len()],
                 data_offsets: (0, encrypted_tensor1.len()),
             }),
         ];
